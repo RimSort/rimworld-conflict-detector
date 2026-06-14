@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+    <packageId>ludeon.rimworld</packageId>
+    <name>Core</name>
+    <author>Ludeon Studios</author>
+    <supportedVersions><li>1.5</li></supportedVersions>
+</ModMetaData>

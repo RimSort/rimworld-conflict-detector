@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Patch>
+    <Operation Class="PatchOperationReplace">
+        <xpath>Defs/ThingDef[defName="Steel"]/statBases/MaxHitPoints</xpath>
+        <value>
+            <MaxHitPoints>150</MaxHitPoints>
+        </value>
+    </Operation>
+    <Operation Class="PatchOperationAdd">
+        <xpath>Defs/ThingDef[defName="Steel"]/statBases</xpath>
+        <value>
+            <Flammability>0.5</Flammability>
+        </value>
+    </Operation>
+</Patch>

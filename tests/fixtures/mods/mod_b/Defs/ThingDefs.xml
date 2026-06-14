@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+    <ThingDef>
+        <defName>Steel</defName>
+        <label>reinforced steel</label>
+        <description>A strong alloy</description>
+        <statBases>
+            <MaxHitPoints>200</MaxHitPoints>
+            <MarketValue>1.9</MarketValue>
+        </statBases>
+    </ThingDef>
+</Defs>

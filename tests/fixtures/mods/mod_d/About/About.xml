@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+    <packageId>test.mod.d</packageId>
+    <name>Test Mod D</name>
+    <supportedVersions><li>1.5</li></supportedVersions>
+</ModMetaData>

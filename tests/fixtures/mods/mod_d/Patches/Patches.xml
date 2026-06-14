@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Patch>
+    <Operation Class="PatchOperationFindMod">
+        <mods>
+            <li>Test Mod C</li>
+        </mods>
+        <match Class="PatchOperationReplace">
+            <xpath>Defs/ThingDef[defName="Steel"]/statBases/MaxHitPoints</xpath>
+            <value>
+                <MaxHitPoints>175</MaxHitPoints>
+            </value>
+        </match>
+    </Operation>
+</Patch>
