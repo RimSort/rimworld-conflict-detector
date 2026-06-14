@@ -1,5 +1,8 @@
 // RimWorld Conflict Detector - Harmony analysis
 
+pub mod attributes;
+pub mod discovery;
+
 #[cfg(test)]
 mod tests {
     use dotnetdll::prelude::*;
