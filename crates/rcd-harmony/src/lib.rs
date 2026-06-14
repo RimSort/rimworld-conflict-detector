@@ -2,6 +2,8 @@
 
 pub mod attributes;
 pub mod discovery;
+pub mod manual;
+pub mod priority;
 
 #[cfg(test)]
 mod tests {

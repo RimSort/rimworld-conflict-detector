@@ -3,6 +3,8 @@ use std::path::Path;
 use dotnetdll::prelude::*;
 use rcd_core::conflict::HarmonyPatchKind;
 
+use crate::priority::extract_priority_info;
+
 /// A Harmony patch discovered by parsing [HarmonyPatch] attributes from a .NET DLL.
 #[derive(Debug, Clone)]
 pub struct DiscoveredPatch {
@@ -56,9 +58,6 @@ impl From<std::io::Error> for HarmonyParseError {
         HarmonyParseError::Io(e)
     }
 }
-
-/// The default Harmony priority (Normal).
-const DEFAULT_PRIORITY: i32 = 400;
 
 /// Harmony attribute names we care about, matched by substring.
 const HARMONY_PATCH: &str = "HarmonyPatch";
@@ -148,6 +147,9 @@ pub fn parse_harmony_patches(dll_path: &Path) -> Result<Vec<DiscoveredPatch>, Ha
             }
         }
 
+        // Extract priority/ordering info from [HarmonyPriority], [HarmonyBefore], [HarmonyAfter]
+        let priority_info = extract_priority_info(typedef, &res);
+
         // Create a DiscoveredPatch for each patch method
         for (patch_kind, returns_bool) in &found_patch_methods {
             patches.push(DiscoveredPatch {
@@ -155,9 +157,9 @@ pub fn parse_harmony_patches(dll_path: &Path) -> Result<Vec<DiscoveredPatch>, Ha
                 target_method: target_method.clone(),
                 parameter_types: parameter_types.clone(),
                 patch_kind: *patch_kind,
-                priority: DEFAULT_PRIORITY,
-                before: Vec::new(),
-                after: Vec::new(),
+                priority: priority_info.priority,
+                before: priority_info.before.clone(),
+                after: priority_info.after.clone(),
                 returns_bool: *returns_bool,
                 dll_name: dll_name.clone(),
             });
@@ -168,7 +170,7 @@ pub fn parse_harmony_patches(dll_path: &Path) -> Result<Vec<DiscoveredPatch>, Ha
 }
 
 /// Get the fully qualified type name of an attribute's constructor.
-fn attribute_type_name<'a>(attr: &Attribute<'a>, res: &Resolution<'a>) -> String {
+pub(crate) fn attribute_type_name<'a>(attr: &Attribute<'a>, res: &Resolution<'a>) -> String {
     match &attr.constructor {
         UserMethod::Definition(method_idx) => res[method_idx.parent_type()].type_name(),
         UserMethod::Reference(method_ref_idx) => {
@@ -319,7 +321,10 @@ mod tests {
             simple_prefix[0].returns_bool,
             "SimplePatch Prefix should return bool (short-circuit risk)"
         );
-        assert_eq!(simple_prefix[0].priority, DEFAULT_PRIORITY);
+        assert_eq!(
+            simple_prefix[0].priority, 400,
+            "Default priority should be Normal (400)"
+        );
 
         let simple_postfix: Vec<_> = patches
             .iter()
@@ -421,5 +426,39 @@ mod tests {
         for patch in &patches {
             assert_eq!(patch.dll_name, "TestPatches.dll");
         }
+    }
+
+    #[test]
+    fn parse_priority_patch_has_priority_and_ordering() {
+        let patches = parse_harmony_patches(&test_dll_path()).unwrap();
+
+        // PriorityPatch targets System.String::IsNullOrEmpty with priority/ordering attributes
+        let priority_patches: Vec<_> = patches
+            .iter()
+            .filter(|p| {
+                p.target_type.as_deref() == Some("System.String")
+                    && p.target_method.as_deref() == Some("IsNullOrEmpty")
+            })
+            .collect();
+
+        assert_eq!(
+            priority_patches.len(),
+            1,
+            "Should find exactly one patch for PriorityPatch"
+        );
+
+        let patch = &priority_patches[0];
+        assert_eq!(patch.priority, 600, "Priority.High should be 600");
+        assert_eq!(
+            patch.before,
+            vec!["other.mod"],
+            "before should contain 'other.mod'"
+        );
+        assert_eq!(
+            patch.after,
+            vec!["dependency.mod"],
+            "after should contain 'dependency.mod'"
+        );
+        assert_eq!(patch.patch_kind, HarmonyPatchKind::Prefix);
     }
 }
