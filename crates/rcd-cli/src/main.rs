@@ -30,14 +30,33 @@ fn main() {
             input,
             game_version,
             rimworld_path,
-        } => {
-            let _ = (input, game_version, rimworld_path);
-            eprintln!("ListMods command: not yet implemented");
-            2
-        }
+        } => run_list_mods(&format, input, game_version, rimworld_path),
     };
 
     std::process::exit(exit_code);
+}
+
+/// Shared helper to resolve mods based on input mode.
+fn resolve_mods(
+    input: args::ScanInput,
+    ordered: bool,
+    game_version: Option<&str>,
+    rimworld_path: Option<&std::path::Path>,
+) -> resolve::ResolvedMods {
+    if let Some(dir) = input.dir {
+        resolve::resolve_from_dir(&dir, game_version)
+    } else if let Some(mod_paths) = input.mods {
+        resolve::resolve_from_mod_paths(&mod_paths, game_version, ordered)
+    } else if let Some(config_path) = input.config {
+        let rw_path = rimworld_path.unwrap_or_else(|| {
+            eprintln!("Error: --rimworld-path is required with --config");
+            std::process::exit(2);
+        });
+        resolve::resolve_from_config(&config_path, rw_path, game_version)
+    } else {
+        eprintln!("Error: no input mode specified");
+        std::process::exit(2);
+    }
 }
 
 fn run_scan(
@@ -49,20 +68,12 @@ fn run_scan(
     rimworld_path: Option<std::path::PathBuf>,
 ) -> i32 {
     // Resolve mods based on input mode
-    let resolved = if let Some(dir) = input.dir {
-        resolve::resolve_from_dir(&dir, game_version.as_deref())
-    } else if let Some(mod_paths) = input.mods {
-        resolve::resolve_from_mod_paths(&mod_paths, game_version.as_deref(), ordered)
-    } else if let Some(config_path) = input.config {
-        let rw_path = rimworld_path.unwrap_or_else(|| {
-            eprintln!("Error: --rimworld-path is required with --config");
-            std::process::exit(2);
-        });
-        resolve::resolve_from_config(&config_path, &rw_path, game_version.as_deref())
-    } else {
-        eprintln!("Error: no input mode specified");
-        return 2;
-    };
+    let resolved = resolve_mods(
+        input,
+        ordered,
+        game_version.as_deref(),
+        rimworld_path.as_deref(),
+    );
 
     if resolved.mods.is_empty() && !resolved.diagnostics.is_empty() {
         // All mods failed to resolve
@@ -110,4 +121,27 @@ fn run_scan(
     }
 
     if report.has_errors() { 1 } else { 0 }
+}
+
+fn run_list_mods(
+    format: &OutputFormat,
+    input: args::ScanInput,
+    game_version: Option<String>,
+    rimworld_path: Option<std::path::PathBuf>,
+) -> i32 {
+    // Resolve mods - list-mods doesn't use ordered parameter
+    let resolved = resolve_mods(
+        input,
+        false,
+        game_version.as_deref(),
+        rimworld_path.as_deref(),
+    );
+
+    if resolved.mods.is_empty() {
+        eprintln!("No mods found.");
+        return 2;
+    }
+
+    println!("{}", output::format_mods_list(&resolved.mods, format));
+    0
 }

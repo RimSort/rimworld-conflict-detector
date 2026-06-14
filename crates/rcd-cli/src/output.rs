@@ -5,6 +5,44 @@ pub fn format_json(report: &Report) -> String {
     serde_json::to_string_pretty(report).unwrap()
 }
 
+pub fn format_mods_list(mods: &[rcd_core::Mod], format: &crate::args::OutputFormat) -> String {
+    match format {
+        crate::args::OutputFormat::Json => {
+            let summaries: Vec<rcd_core::ModSummary> =
+                mods.iter().map(rcd_core::ModSummary::from).collect();
+            serde_json::to_string_pretty(&summaries).unwrap()
+        }
+        crate::args::OutputFormat::Human => {
+            if mods.is_empty() {
+                return "No mods found.\n".to_string();
+            }
+            mods.iter()
+                .enumerate()
+                .map(|(i, m)| {
+                    format!(
+                        "{:>3}. {} ({}){}\n     Versions: {}  Deps: {}",
+                        i + 1,
+                        m.name,
+                        m.package_id,
+                        if m.is_base_content { " [base]" } else { "" },
+                        if m.supported_versions.is_empty() {
+                            "any".into()
+                        } else {
+                            m.supported_versions.join(", ")
+                        },
+                        if m.dependencies.is_empty() {
+                            "none".into()
+                        } else {
+                            m.dependencies.join(", ")
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n\n")
+        }
+    }
+}
+
 pub fn format_human(report: &Report, min_severity: Severity) -> String {
     let mut output = String::new();
 
