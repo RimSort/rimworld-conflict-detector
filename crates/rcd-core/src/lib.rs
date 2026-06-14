@@ -3,6 +3,7 @@ pub mod conflict;
 pub mod detector;
 pub mod diagnostic;
 pub mod folder;
+pub mod mods_config;
 pub mod report;
 pub mod severity;
 pub mod types;
