@@ -650,6 +650,8 @@ name = "rcd-core"
 version = "0.1.0"
 dependencies = [
  "quick-xml",
+ "rcd-harmony",
+ "rcd-xml",
  "serde",
  "serde_json",
  "thiserror",
