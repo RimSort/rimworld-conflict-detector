@@ -1,9 +1,95 @@
 // RimWorld Conflict Detector - Harmony analysis
 
 pub mod attributes;
+pub mod conflict;
 pub mod discovery;
 pub mod manual;
 pub mod priority;
+
+use std::panic;
+
+use rcd_core::{
+    Conflict, Detector, Diagnostic, DiagnosticSource, LoadOrder, Mod, ModSummary, Severity,
+};
+
+use crate::attributes::DiscoveredPatch;
+use crate::conflict::detect_harmony_conflicts;
+use crate::discovery::discover_assemblies;
+
+/// Detector that finds Harmony patch conflicts across mods.
+///
+/// For each mod, discovers assemblies, parses Harmony patch attributes from DLLs,
+/// then detects conflicts where multiple mods patch the same method.
+pub struct HarmonyDetector;
+
+impl Detector for HarmonyDetector {
+    fn name(&self) -> &str {
+        "harmony"
+    }
+
+    fn analyze(&self, mods: &[Mod], order: Option<&LoadOrder>) -> (Vec<Conflict>, Vec<Diagnostic>) {
+        let mut all_patches: Vec<(ModSummary, Vec<DiscoveredPatch>)> = Vec::new();
+        let mut diagnostics: Vec<Diagnostic> = Vec::new();
+
+        for m in mods {
+            let mod_summary = ModSummary::from(m);
+            let mut mod_patches: Vec<DiscoveredPatch> = Vec::new();
+
+            for assemblies_path in &m.assemblies_paths {
+                let dlls = discover_assemblies(assemblies_path);
+
+                for dll_path in dlls {
+                    let dll_name = dll_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown.dll")
+                        .to_string();
+
+                    // Wrap parse_harmony_patches in catch_unwind since dotnetdll is
+                    // pre-1.0 and may panic on malformed DLLs.
+                    let parse_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        crate::attributes::parse_harmony_patches(&dll_path)
+                    }));
+
+                    match parse_result {
+                        Ok(Ok(patches)) => {
+                            mod_patches.extend(patches);
+                        }
+                        Ok(Err(e)) => {
+                            diagnostics.push(Diagnostic {
+                                affected_mod: Some(mod_summary.package_id.clone()),
+                                severity: Severity::Warning,
+                                message: format!(
+                                    "Failed to parse Harmony patches from {}: {}",
+                                    dll_name, e
+                                ),
+                                source: DiagnosticSource::DllParsing,
+                            });
+                        }
+                        Err(_) => {
+                            diagnostics.push(Diagnostic {
+                                affected_mod: Some(mod_summary.package_id.clone()),
+                                severity: Severity::Warning,
+                                message: format!(
+                                    "DLL parser panicked while parsing {} (dotnetdll crash caught)",
+                                    dll_name
+                                ),
+                                source: DiagnosticSource::DllParsing,
+                            });
+                        }
+                    }
+                }
+            }
+
+            if !mod_patches.is_empty() {
+                all_patches.push((mod_summary, mod_patches));
+            }
+        }
+
+        let conflicts = detect_harmony_conflicts(&all_patches, order);
+        (conflicts, diagnostics)
+    }
+}
 
 #[cfg(test)]
 mod tests {
