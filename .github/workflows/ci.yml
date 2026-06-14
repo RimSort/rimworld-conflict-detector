@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - name: Build test fixtures
+        run: |
+          if command -v dotnet &> /dev/null; then
+            cd tests/fixtures/harmony/build
+            dotnet build -c Release
+            cp bin/Release/netstandard2.0/TestPatches.dll ../dlls/
+          fi
+      - run: cargo clippy --workspace -- -D warnings
+      - run: cargo fmt --check
+      - run: cargo test --workspace
+      - run: cargo build --workspace --release
