@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+    <name>Test Mod A</name>
+    <author>TestAuthor</author>
+    <packageId>test.mod.a</packageId>
+    <supportedVersions>
+        <li>1.4</li>
+        <li>1.5</li>
+    </supportedVersions>
+    <modDependencies>
+        <li>
+            <packageId>brrainz.harmony</packageId>
+        </li>
+    </modDependencies>
+    <incompatibleWith>
+        <li>bad.mod</li>
+    </incompatibleWith>
+    <loadAfter>
+        <li>ludeon.rimworld</li>
+    </loadAfter>
+    <loadBefore>
+        <li>other.mod</li>
+    </loadBefore>
+    <forceLoadAfter>
+        <li>ludeon.rimworld</li>
+    </forceLoadAfter>
+</ModMetaData>

@@ -1,3 +1,4 @@
+pub mod about_xml;
 pub mod conflict;
 pub mod detector;
 pub mod diagnostic;
