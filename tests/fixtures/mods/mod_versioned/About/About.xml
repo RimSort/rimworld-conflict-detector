@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+    <packageId>test.mod.versioned</packageId>
+    <name>Versioned Mod</name>
+    <supportedVersions><li>1.4</li><li>1.5</li></supportedVersions>
+</ModMetaData>

@@ -2,6 +2,7 @@ pub mod about_xml;
 pub mod conflict;
 pub mod detector;
 pub mod diagnostic;
+pub mod folder;
 pub mod report;
 pub mod severity;
 pub mod types;
