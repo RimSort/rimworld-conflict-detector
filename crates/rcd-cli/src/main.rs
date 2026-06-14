@@ -1,4 +1,5 @@
 mod args;
+mod output;
 mod resolve;
 
 use args::{Cli, Commands, MinSeverity, OutputFormat};
@@ -101,78 +102,12 @@ fn run_scan(
 
     match format {
         OutputFormat::Json => {
-            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            println!("{}", output::format_json(&report));
         }
         OutputFormat::Human => {
-            // Print diagnostics first
-            for d in &report.diagnostics {
-                eprintln!(
-                    "[{}] {}: {}",
-                    d.severity,
-                    d.affected_mod.as_deref().unwrap_or("unknown"),
-                    d.message
-                );
-            }
-
-            // Print conflicts
-            let filtered = report.conflicts_at_or_above(min_severity);
-            if filtered.is_empty() {
-                println!("No conflicts found at {} level or above.", min_severity);
-            } else {
-                println!("Found {} conflict(s):\n", filtered.len());
-                for conflict in &filtered {
-                    let severity = conflict.severity();
-                    match conflict {
-                        rcd_core::Conflict::Def(dc) => {
-                            println!("[{:?}] {} -- {:?}", severity, dc.target, dc.mechanism);
-                            println!(
-                                "  Mods: {}",
-                                dc.mods
-                                    .iter()
-                                    .map(|m| m.name.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            );
-                            if let Some(winner) = &dc.winner {
-                                println!("  Winner: {}", winner);
-                            }
-                            if let Some(cond) = &dc.condition {
-                                println!("  Condition: {}", cond);
-                            }
-                            println!();
-                        }
-                        rcd_core::Conflict::Harmony(hc) => {
-                            println!("[{:?}] {}", severity, hc.target);
-                            for p in &hc.patches {
-                                println!(
-                                    "  {} ({:?}) from {} [{}] priority={}",
-                                    p.mod_summary.name,
-                                    p.patch_kind,
-                                    p.dll_name,
-                                    if p.returns_bool { "returns bool" } else { "" },
-                                    p.priority
-                                );
-                            }
-                            if hc.short_circuit_risk {
-                                println!(
-                                    "  WARNING: Short-circuit risk: prefix may skip original method"
-                                );
-                            }
-                            println!();
-                        }
-                    }
-                }
-            }
-
-            // Print summary
-            println!(
-                "Summary: {} error(s), {} warning(s), {} info",
-                report.summary.conflicts_by_severity.error,
-                report.summary.conflicts_by_severity.warning,
-                report.summary.conflicts_by_severity.info
-            );
+            print!("{}", output::format_human(&report, min_severity));
         }
-    };
+    }
 
     if report.has_errors() { 1 } else { 0 }
 }
