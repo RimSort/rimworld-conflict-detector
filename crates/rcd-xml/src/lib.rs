@@ -2,3 +2,4 @@
 
 pub mod def_parser;
 pub mod replacement;
+pub mod xpath;
