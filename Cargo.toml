@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rcd-core",
+    "crates/rcd-xml",
+    "crates/rcd-harmony",
+    "crates/rcd-ffi",
+    "crates/rcd-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/cebarks/rimworld-conflict-detector"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+quick-xml = { version = "0.37", features = ["serialize"] }
+dotnetdll = "0.2"
+clap = { version = "4", features = ["derive"] }
+rayon = "1"
+thiserror = "2"
+walkdir = "2"
+chrono = "0.4"
+
+rcd-core = { path = "crates/rcd-core" }
+rcd-xml = { path = "crates/rcd-xml" }
+rcd-harmony = { path = "crates/rcd-harmony" }

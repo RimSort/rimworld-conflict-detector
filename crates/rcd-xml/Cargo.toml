@@ -1,0 +1,10 @@
+[package]
+name = "rcd-xml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rcd-core = { workspace = true }
+quick-xml = { workspace = true }
+thiserror = { workspace = true }
