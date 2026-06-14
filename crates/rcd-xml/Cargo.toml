@@ -7,5 +7,6 @@ license.workspace = true
 [dependencies]
 rcd-core = { workspace = true }
 quick-xml = { workspace = true }
+rayon = { workspace = true }
 thiserror = { workspace = true }
 walkdir = { workspace = true }

@@ -7,6 +7,7 @@ pub mod patch_ops;
 pub mod replacement;
 pub mod xpath;
 
+use rayon::prelude::*;
 use rcd_core::{
     Conflict, Detector, Diagnostic, DiagnosticSource, LoadOrder, Mod, ModSummary, Severity,
 };
@@ -27,48 +28,62 @@ impl Detector for XmlDetector {
 
     fn analyze(&self, mods: &[Mod], order: Option<&LoadOrder>) -> (Vec<Conflict>, Vec<Diagnostic>) {
         let mut all_conflicts = Vec::new();
-        let mut all_diagnostics = Vec::new();
 
-        // 1. Parse defs from all mods
-        let mut all_mod_defs = Vec::new();
-        for mod_data in mods {
-            let mut defs = Vec::new();
-            for defs_path in &mod_data.defs_paths {
-                defs.extend(def_parser::parse_defs_dir(defs_path));
-            }
+        // Parallel parsing of mods — each mod's XML parsing is independent
+        let parsed: Vec<_> = mods
+            .par_iter()
+            .map(|mod_data| {
+                let mod_summary = ModSummary::from(mod_data);
+                let package_id = mod_data.package_id.clone();
 
-            all_mod_defs.push(replacement::ModDefs {
-                mod_summary: ModSummary::from(mod_data),
-                package_id: mod_data.package_id.clone(),
-                defs,
-            });
-        }
+                // Parse defs
+                let mut defs = Vec::new();
+                for defs_path in &mod_data.defs_paths {
+                    defs.extend(def_parser::parse_defs_dir(defs_path));
+                }
 
-        // 2. Parse patches from all mods
-        let mut all_mod_patches = Vec::new();
-        for mod_data in mods {
-            let mut patches = Vec::new();
-            for patches_path in &mod_data.patches_paths {
-                match patch_ops::parse_patches_dir(patches_path) {
-                    Ok(parsed_patches) => patches.extend(parsed_patches),
-                    Err(e) => {
-                        all_diagnostics.push(Diagnostic {
-                            affected_mod: Some(mod_data.package_id.clone()),
-                            severity: Severity::Warning,
-                            message: format!(
-                                "Failed to parse patches in {}: {}",
-                                patches_path.display(),
-                                e
-                            ),
-                            source: DiagnosticSource::XmlParsing,
-                        });
+                // Parse patches
+                let mut patches = Vec::new();
+                let mut diagnostics = Vec::new();
+                for patches_path in &mod_data.patches_paths {
+                    match patch_ops::parse_patches_dir(patches_path) {
+                        Ok(parsed_patches) => patches.extend(parsed_patches),
+                        Err(e) => {
+                            diagnostics.push(Diagnostic {
+                                affected_mod: Some(package_id.clone()),
+                                severity: Severity::Warning,
+                                message: format!(
+                                    "Failed to parse patches in {}: {}",
+                                    patches_path.display(),
+                                    e
+                                ),
+                                source: DiagnosticSource::XmlParsing,
+                            });
+                        }
                     }
                 }
-            }
+
+                (mod_summary, package_id, defs, patches, diagnostics)
+            })
+            .collect();
+
+        // Build mod_defs and mod_patches lists from parsed results
+        let mut all_mod_defs = Vec::new();
+        let mut all_mod_patches = Vec::new();
+        let mut all_diagnostics = Vec::new();
+
+        for (mod_summary, package_id, defs, patches, diagnostics) in parsed {
+            all_mod_defs.push(replacement::ModDefs {
+                mod_summary: mod_summary.clone(),
+                package_id,
+                defs,
+            });
 
             if !patches.is_empty() {
-                all_mod_patches.push((ModSummary::from(mod_data), patches));
+                all_mod_patches.push((mod_summary, patches));
             }
+
+            all_diagnostics.extend(diagnostics);
         }
 
         // 3. Detect direct replacement conflicts

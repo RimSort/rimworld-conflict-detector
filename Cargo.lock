@@ -670,6 +670,7 @@ name = "rcd-harmony"
 version = "0.1.0"
 dependencies = [
  "dotnetdll",
+ "rayon",
  "rcd-core",
  "tempfile",
  "thiserror",
@@ -681,6 +682,7 @@ name = "rcd-xml"
 version = "0.1.0"
 dependencies = [
  "quick-xml",
+ "rayon",
  "rcd-core",
  "thiserror",
  "walkdir",
