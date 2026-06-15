@@ -84,8 +84,15 @@ pub fn resolve_from_config(
 
     let version = game_version.map(String::from).or(config.version.clone());
 
-    // Search directories: Data/ (Core/DLC), Mods/ (local), and potentially Steam Workshop
-    let search_dirs = vec![rimworld_path.join("Data"), rimworld_path.join("Mods")];
+    // Search directories: Data/ (Core/DLC), Mods/ (local), and Steam Workshop
+    let mut search_dirs = vec![rimworld_path.join("Data"), rimworld_path.join("Mods")];
+
+    // Auto-detect Steam Workshop path by walking up from rimworld_path
+    // to find steamapps/workshop/content/294100/
+    if let Some(workshop) = find_steam_workshop(rimworld_path) {
+        search_dirs.push(workshop);
+    }
+
     let available = discover_mods(&search_dirs, version.as_deref());
 
     // Build packageId -> Mod map
@@ -119,4 +126,24 @@ pub fn resolve_from_config(
         load_order: Some(config.load_order()),
         diagnostics,
     }
+}
+
+/// Walk up from the RimWorld install path to find the Steam Workshop content directory.
+/// RimWorld's Steam app ID is 294100.
+///
+/// Typical layout:
+///   steamapps/common/RimWorld/          (or RimWorldMac.app/)
+///   steamapps/workshop/content/294100/  (workshop mods)
+fn find_steam_workshop(rimworld_path: &Path) -> Option<PathBuf> {
+    let mut current = rimworld_path.to_path_buf();
+    while let Some(parent) = current.parent() {
+        if parent.file_name().is_some_and(|n| n == "steamapps") {
+            let workshop = parent.join("workshop/content/294100");
+            if workshop.is_dir() {
+                return Some(workshop);
+            }
+        }
+        current = parent.to_path_buf();
+    }
+    None
 }
