@@ -41,6 +41,11 @@ impl Engine {
             all_diagnostics.extend(diagnostics);
         }
 
+        // Validate load order against declared constraints
+        if let Some(order) = order {
+            all_diagnostics.extend(crate::load_order::validate_load_order(mods, order));
+        }
+
         Report::build(metadata, all_conflicts, all_diagnostics)
     }
 }

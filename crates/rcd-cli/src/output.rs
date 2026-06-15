@@ -1,5 +1,9 @@
+use std::collections::HashMap;
+
 use rcd_core::conflict::*;
 use rcd_core::{Conflict, Report, Severity};
+
+use crate::args::GroupBy;
 
 pub fn format_json(report: &Report) -> String {
     serde_json::to_string_pretty(report).unwrap()
@@ -43,7 +47,7 @@ pub fn format_mods_list(mods: &[rcd_core::Mod], format: &crate::args::OutputForm
     }
 }
 
-pub fn format_human(report: &Report, min_severity: Severity) -> String {
+pub fn format_human(report: &Report, min_severity: Severity, group_by: &GroupBy) -> String {
     let mut output = String::new();
 
     // Diagnostics first
@@ -69,9 +73,52 @@ pub fn format_human(report: &Report, min_severity: Severity) -> String {
         ));
     } else {
         output.push_str(&format!("Found {} conflict(s):\n\n", filtered.len()));
-        for conflict in &filtered {
-            output.push_str(&format_conflict(conflict));
-            output.push('\n');
+
+        match group_by {
+            GroupBy::Severity => {
+                for &sev in &[Severity::Error, Severity::Warning, Severity::Info] {
+                    if sev < min_severity {
+                        continue;
+                    }
+                    let group: Vec<_> = filtered.iter().filter(|c| c.severity() == sev).collect();
+                    if group.is_empty() {
+                        continue;
+                    }
+                    let label = match sev {
+                        Severity::Error => "Errors",
+                        Severity::Warning => "Warnings",
+                        Severity::Info => "Info",
+                    };
+                    output.push_str(&format!("── {} ({}) ──\n\n", label, group.len()));
+                    for conflict in group {
+                        output.push_str(&format_conflict(conflict));
+                        output.push('\n');
+                    }
+                }
+            }
+            GroupBy::Mod => {
+                let mut by_mod: HashMap<String, Vec<&Conflict>> = HashMap::new();
+                for conflict in &filtered {
+                    for m in conflict.involved_mods() {
+                        by_mod.entry(m.name.clone()).or_default().push(conflict);
+                    }
+                }
+                let mut mod_names: Vec<_> = by_mod.keys().cloned().collect();
+                mod_names.sort();
+                for mod_name in mod_names {
+                    let conflicts = &by_mod[&mod_name];
+                    output.push_str(&format!(
+                        "── {} ({} conflict{}) ──\n\n",
+                        mod_name,
+                        conflicts.len(),
+                        if conflicts.len() == 1 { "" } else { "s" }
+                    ));
+                    for conflict in conflicts {
+                        output.push_str(&format_conflict(conflict));
+                        output.push('\n');
+                    }
+                }
+            }
         }
     }
 

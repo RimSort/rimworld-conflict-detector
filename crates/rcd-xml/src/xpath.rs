@@ -129,6 +129,7 @@ pub fn xpaths_overlap(a: &NormalizedXPath, b: &NormalizedXPath) -> bool {
 
     match (&a.def_name, &b.def_name) {
         (Some(dn_a), Some(dn_b)) if dn_a == dn_b => {}
+        (None, _) | (_, None) => {} // None = wildcard, targets all defs of this type
         _ => return false,
     }
 
@@ -202,6 +203,26 @@ mod tests {
         let a = normalize_xpath("Defs/ThingDef[defName=\"Steel\"]/statBases");
         let b = normalize_xpath("Defs/ThingDef[defName=\"Wood\"]/statBases");
         assert!(!xpaths_overlap(&a, &b));
+    }
+
+    #[test]
+    fn wildcard_xpath_overlaps_with_specific() {
+        let a = normalize_xpath("Defs/ThingDef/statBases");
+        let b = normalize_xpath("Defs/ThingDef[defName=\"Steel\"]/statBases");
+        assert!(
+            xpaths_overlap(&a, &b),
+            "Wildcard (no defName) should overlap with specific def"
+        );
+    }
+
+    #[test]
+    fn wildcard_xpath_overlaps_with_wildcard() {
+        let a = normalize_xpath("Defs/ThingDef/statBases");
+        let b = normalize_xpath("Defs/ThingDef/costList");
+        assert!(
+            !xpaths_overlap(&a, &b),
+            "Same wildcard type but different fields should not overlap"
+        );
     }
 
     #[test]

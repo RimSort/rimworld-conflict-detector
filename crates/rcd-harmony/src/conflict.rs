@@ -115,33 +115,102 @@ pub fn detect_harmony_conflicts(
     conflicts
 }
 
-/// Build an execution order list based on priority values and load order.
+/// Build an execution order list based on priority values, Before/After constraints,
+/// and load order as tiebreaker.
 ///
-/// Higher priority prefix runs first. For equal priorities, use load order as tiebreaker
-/// (earlier in load order runs first).
+/// 1. Sort by priority (higher runs first)
+/// 2. Within each priority tier, apply [HarmonyBefore]/[HarmonyAfter] constraints
+///    via topological sort (petgraph)
+/// 3. Load order is the tiebreaker for unconstrained pairs within the same priority
 fn build_execution_order(
     entries: &[(&ModSummary, &DiscoveredPatch)],
     order: Option<&LoadOrder>,
 ) -> Option<Vec<String>> {
     let order = order?;
 
-    let mut sorted: Vec<(&ModSummary, &DiscoveredPatch)> = entries.to_vec();
-    sorted.sort_by(|(mod_a, patch_a), (mod_b, patch_b)| {
-        // Higher priority runs first (descending)
-        patch_b.priority.cmp(&patch_a.priority).then_with(|| {
-            // For equal priorities, earlier in load order runs first (ascending)
-            let pos_a = order.position(&mod_a.package_id).unwrap_or(usize::MAX);
-            let pos_b = order.position(&mod_b.package_id).unwrap_or(usize::MAX);
-            pos_a.cmp(&pos_b)
-        })
-    });
+    // Group entries by priority
+    let mut by_priority: HashMap<i32, Vec<(&ModSummary, &DiscoveredPatch)>> = HashMap::new();
+    for entry in entries {
+        by_priority
+            .entry(entry.1.priority)
+            .or_default()
+            .push(*entry);
+    }
 
-    Some(
-        sorted
-            .iter()
-            .map(|(mod_summary, _)| mod_summary.package_id.clone())
-            .collect(),
-    )
+    // Sort priority tiers descending (higher priority runs first)
+    let mut priority_tiers: Vec<i32> = by_priority.keys().copied().collect();
+    priority_tiers.sort_unstable_by(|a, b| b.cmp(a));
+
+    let mut result = Vec::new();
+
+    for priority in priority_tiers {
+        let tier = &by_priority[&priority];
+
+        if tier.len() <= 1 {
+            if let Some((ms, _)) = tier.first() {
+                result.push(ms.package_id.clone());
+            }
+            continue;
+        }
+
+        // Build a DAG for this tier using Before/After constraints
+        use petgraph::algo::toposort;
+        use petgraph::graph::DiGraph;
+
+        let mut graph = DiGraph::<usize, ()>::new();
+        let mut idx_to_node: Vec<petgraph::graph::NodeIndex> = Vec::new();
+
+        // Add nodes (one per entry in this tier)
+        for i in 0..tier.len() {
+            idx_to_node.push(graph.add_node(i));
+        }
+
+        // Add edges from Before/After constraints
+        for (i, (_ms_i, patch_i)) in tier.iter().enumerate() {
+            // If patch_i declares HarmonyBefore("mod.x"), i should come before mod.x
+            for before_id in &patch_i.before {
+                if let Some(j) = tier
+                    .iter()
+                    .position(|(ms_j, _)| ms_j.package_id == *before_id)
+                {
+                    graph.add_edge(idx_to_node[i], idx_to_node[j], ());
+                }
+            }
+            // If patch_i declares HarmonyAfter("mod.x"), mod.x should come before i
+            for after_id in &patch_i.after {
+                if let Some(j) = tier
+                    .iter()
+                    .position(|(ms_j, _)| ms_j.package_id == *after_id)
+                {
+                    graph.add_edge(idx_to_node[j], idx_to_node[i], ());
+                }
+            }
+        }
+
+        // Topological sort; fall back to load order on cycle
+        match toposort(&graph, None) {
+            Ok(sorted_nodes) => {
+                // Within unconstrained groups, sort by load order
+                let sorted_ids: Vec<String> = sorted_nodes
+                    .iter()
+                    .map(|node| {
+                        let idx = graph[*node];
+                        tier[idx].0.package_id.clone()
+                    })
+                    .collect();
+                result.extend(sorted_ids);
+            }
+            Err(_cycle) => {
+                // Cycle detected — fall back to load order
+                let mut fallback: Vec<(&ModSummary, &DiscoveredPatch)> = tier.clone();
+                fallback
+                    .sort_by_key(|(ms, _)| order.position(&ms.package_id).unwrap_or(usize::MAX));
+                result.extend(fallback.iter().map(|(ms, _)| ms.package_id.clone()));
+            }
+        }
+    }
+
+    Some(result)
 }
 
 /// Convert a DiscoveredPatch into a HarmonyPatchInfo for the conflict model.
@@ -505,5 +574,52 @@ mod tests {
             conflicts.is_empty(),
             "Patches with missing target_type or target_method should be skipped"
         );
+    }
+
+    #[test]
+    fn before_after_constraints_override_load_order() {
+        let order = LoadOrder {
+            package_ids: vec!["mod.a".to_string(), "mod.b".to_string()],
+        };
+
+        // mod.a loads first but declares HarmonyAfter("mod.b"),
+        // so mod.b should come before mod.a in execution order
+        let all_patches = vec![
+            (
+                test_mod("mod.a"),
+                vec![{
+                    let mut p = make_patch("Pawn", "Kill", HarmonyPatchKind::Prefix, false, 400);
+                    p.after = vec!["mod.b".to_string()];
+                    p
+                }],
+            ),
+            (
+                test_mod("mod.b"),
+                vec![make_patch(
+                    "Pawn",
+                    "Kill",
+                    HarmonyPatchKind::Prefix,
+                    false,
+                    400,
+                )],
+            ),
+        ];
+
+        let conflicts = detect_harmony_conflicts(&all_patches, Some(&order));
+        assert_eq!(conflicts.len(), 1);
+
+        if let Conflict::Harmony(hc) = &conflicts[0] {
+            let exec_order = hc
+                .execution_order
+                .as_ref()
+                .expect("should have execution_order");
+            assert_eq!(
+                exec_order[0], "mod.b",
+                "mod.b should run first (mod.a declares HarmonyAfter mod.b)"
+            );
+            assert_eq!(exec_order[1], "mod.a");
+        } else {
+            panic!("Expected Harmony conflict");
+        }
     }
 }

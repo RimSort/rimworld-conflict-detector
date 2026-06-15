@@ -52,6 +52,7 @@ fn parse_about_xml_str(xml: &str, mod_root: &Path) -> Result<Mod, AboutXmlError>
     let mut buf = Vec::new();
     let mut current_section: Option<String> = None;
     let mut in_dependency_li = false;
+    let mut dep_li_element: Option<String> = None;
 
     loop {
         match reader.read_event_into(&mut buf)? {
@@ -65,9 +66,14 @@ fn parse_about_xml_str(xml: &str, mod_root: &Path) -> Result<Mod, AboutXmlError>
                     "li" => {
                         if matches!(current_section.as_deref(), Some("modDependencies")) {
                             in_dependency_li = true;
+                            dep_li_element = None;
                         }
                     }
-                    _ => {}
+                    _ => {
+                        if in_dependency_li {
+                            dep_li_element = Some(tag_name);
+                        }
+                    }
                 }
             }
             Event::End(e) => {
@@ -79,8 +85,13 @@ fn parse_about_xml_str(xml: &str, mod_root: &Path) -> Result<Mod, AboutXmlError>
                     }
                     "li" => {
                         in_dependency_li = false;
+                        dep_li_element = None;
                     }
-                    _ => {}
+                    _ => {
+                        if in_dependency_li {
+                            dep_li_element = None;
+                        }
+                    }
                 }
             }
             Event::Text(e) => {
@@ -109,13 +120,14 @@ fn parse_about_xml_str(xml: &str, mod_root: &Path) -> Result<Mod, AboutXmlError>
                     Some("forceLoadBefore") => {
                         force_load_before.push(text.to_lowercase());
                     }
-                    Some("modDependencies") if in_dependency_li => {
-                        // This is a packageId inside a modDependency <li>
+                    Some("modDependencies")
+                        if in_dependency_li
+                            && matches!(dep_li_element.as_deref(), Some("packageId")) =>
+                    {
                         dependencies.push(text.to_lowercase());
                     }
                     None => {
-                        // Top-level fields - need to track what the current element is
-                        // We'll need a more sophisticated approach
+                        // Top-level fields handled in second pass
                     }
                     _ => {}
                 }
@@ -277,5 +289,36 @@ mod tests {
         assert_eq!(result.dependencies, vec!["dependency.withcaps"]);
         assert_eq!(result.incompatibilities, vec!["bad.mod.caps"]);
         assert_eq!(result.load_after, vec!["loadafter.caps"]);
+    }
+
+    #[test]
+    fn dependency_only_captures_package_id() {
+        let xml = r#"
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+    <packageId>test.mod</packageId>
+    <modDependencies>
+        <li>
+            <packageId>brrainz.harmony</packageId>
+            <displayName>Harmony</displayName>
+            <steamWorkshopUrl>steam://url/CommunityFilePage/2009463077</steamWorkshopUrl>
+            <downloadUrl>https://github.com/pardeike/HarmonyRimWorld/releases/latest</downloadUrl>
+        </li>
+        <li>
+            <packageId>other.dep</packageId>
+            <displayName>Other Dependency</displayName>
+        </li>
+    </modDependencies>
+</ModMetaData>
+        "#;
+
+        let mod_root = PathBuf::from("/fake/path");
+        let result = parse_about_xml_str(xml, &mod_root).expect("Failed to parse");
+
+        assert_eq!(
+            result.dependencies,
+            vec!["brrainz.harmony", "other.dep"],
+            "Should only capture packageId, not displayName or URLs"
+        );
     }
 }

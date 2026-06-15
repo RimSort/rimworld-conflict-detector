@@ -11,6 +11,7 @@ fn main() {
     let cli = Cli::parse();
     let format = cli.format;
     let severity = cli.severity;
+    let group_by = cli.group_by;
 
     let exit_code = match cli.command {
         Commands::Scan {
@@ -21,6 +22,7 @@ fn main() {
         } => run_scan(
             &format,
             &severity,
+            &group_by,
             input,
             ordered,
             game_version,
@@ -62,6 +64,7 @@ fn resolve_mods(
 fn run_scan(
     format: &OutputFormat,
     severity_filter: &MinSeverity,
+    group_by: &args::GroupBy,
     input: args::ScanInput,
     ordered: bool,
     game_version: Option<String>,
@@ -116,7 +119,7 @@ fn run_scan(
             println!("{}", output::format_json(&report));
         }
         OutputFormat::Human => {
-            print!("{}", output::format_human(&report, min_severity));
+            print!("{}", output::format_human(&report, min_severity, group_by));
         }
     }
 

@@ -85,7 +85,7 @@ pub fn parse_patches_from_xml(xml: &str, source: &str) -> Vec<ParsedPatchOp> {
                         parse_operation(&mut reader, &class, source, None, &mut ops);
                     } else {
                         // Skip unknown operation without Class
-                        skip_element(&mut reader, &tag);
+                        skip_current_element_by_depth(&mut reader);
                     }
                 }
             }
@@ -329,32 +329,7 @@ fn extract_class_attr(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
     None
 }
 
-/// Skip an element by tag name: read until the matching closing tag.
-fn skip_element(reader: &mut Reader<&[u8]>, tag_name: &str) {
-    let mut depth: u32 = 1;
-    let mut buf = Vec::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(_)) => depth += 1,
-            Ok(Event::End(ref e)) => {
-                let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                if tag == tag_name {
-                    depth -= 1;
-                    if depth == 0 {
-                        break;
-                    }
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
-            _ => {}
-        }
-        buf.clear();
-    }
-}
-
-/// Skip the current element by tracking depth (when we don't know the tag name).
+/// Skip the current element by tracking depth.
 fn skip_current_element_by_depth(reader: &mut Reader<&[u8]>) {
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
