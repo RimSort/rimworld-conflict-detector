@@ -16,9 +16,18 @@ impl std::fmt::Display for DefTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefConflictMechanism {
-    DirectReplacement { divergent_fields: Vec<String> },
-    XPathOverlap { xpath_a: String, xpath_b: String },
-    XPathOnReplacedDef { xpath: String, replaced_by: String },
+    DirectReplacement {
+        divergent_fields: Vec<String>,
+    },
+    XPathOverlap {
+        xpath_a: String,
+        xpath_b: String,
+        wildcard: bool,
+    },
+    XPathOnReplacedDef {
+        xpath: String,
+        replaced_by: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +92,13 @@ impl Conflict {
         match self {
             Conflict::Def(dc) => match &dc.mechanism {
                 DefConflictMechanism::DirectReplacement { .. } => Severity::Error,
-                DefConflictMechanism::XPathOverlap { .. } => Severity::Warning,
+                DefConflictMechanism::XPathOverlap { wildcard, .. } => {
+                    if *wildcard {
+                        Severity::Info
+                    } else {
+                        Severity::Warning
+                    }
+                }
                 DefConflictMechanism::XPathOnReplacedDef { .. } => Severity::Error,
             },
             Conflict::Harmony(hc) => {
@@ -151,11 +166,31 @@ mod tests {
             mechanism: DefConflictMechanism::XPathOverlap {
                 xpath_a: "Defs/ThingDef[defName=\"Steel\"]/statBases".into(),
                 xpath_b: "Defs/ThingDef[defName=\"Steel\"]/statBases".into(),
+                wildcard: false,
             },
             winner: None,
             condition: None,
         });
         assert_eq!(c.severity(), Severity::Warning);
+    }
+
+    #[test]
+    fn wildcard_xpath_overlap_is_info() {
+        let c = Conflict::Def(DefConflict {
+            target: DefTarget {
+                def_type: "ThingDef".into(),
+                def_name: String::new(),
+            },
+            mods: vec![test_mod("mod.a"), test_mod("mod.b")],
+            mechanism: DefConflictMechanism::XPathOverlap {
+                xpath_a: "Defs/ThingDef/statBases".into(),
+                xpath_b: "Defs/ThingDef[defName=\"Steel\"]/statBases".into(),
+                wildcard: true,
+            },
+            winner: None,
+            condition: None,
+        });
+        assert_eq!(c.severity(), Severity::Info);
     }
 
     #[test]

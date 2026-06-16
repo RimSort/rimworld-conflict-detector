@@ -80,12 +80,15 @@ pub fn detect_xpath_conflicts(
                     .or(op_b.condition.as_ref())
                     .map(|c| format!("requires mod: {}", c.required_mod));
 
+                let wildcard = norm_a.def_name.is_none() || norm_b.def_name.is_none();
+
                 conflicts.push(Conflict::Def(DefConflict {
                     target: DefTarget { def_type, def_name },
                     mods: vec![(*mod_a).clone(), (*mod_b).clone()],
                     mechanism: DefConflictMechanism::XPathOverlap {
                         xpath_a: op_a.xpath.clone(),
                         xpath_b: op_b.xpath.clone(),
+                        wildcard,
                     },
                     winner,
                     condition,
@@ -357,6 +360,90 @@ mod tests {
             Conflict::Def(dc) => {
                 // mod_d is later in load order
                 assert_eq!(dc.winner.as_deref(), Some("test.mod.d"));
+            }
+            _ => panic!("Expected Conflict::Def"),
+        }
+    }
+
+    #[test]
+    fn wildcard_xpath_overlap_is_info() {
+        let mod_c = test_mod("test.mod.c", "Mod C");
+        let mod_d = test_mod("test.mod.d", "Mod D");
+
+        let patches = vec![
+            (
+                mod_c,
+                vec![ParsedPatchOp {
+                    op_type: PatchOpType::Replace,
+                    xpath: "Defs/ThingDef/statBases/MaxHitPoints".to_string(),
+                    source_file: "mod_c/Patches/Patches.xml".to_string(),
+                    condition: None,
+                }],
+            ),
+            (
+                mod_d,
+                vec![ParsedPatchOp {
+                    op_type: PatchOpType::Replace,
+                    xpath: r#"Defs/ThingDef[defName="Steel"]/statBases/MaxHitPoints"#.to_string(),
+                    source_file: "mod_d/Patches/Patches.xml".to_string(),
+                    condition: None,
+                }],
+            ),
+        ];
+
+        let replacement_defs = HashMap::new();
+        let conflicts = detect_xpath_conflicts(&patches, &replacement_defs, None);
+
+        assert_eq!(conflicts.len(), 1);
+        match &conflicts[0] {
+            Conflict::Def(dc) => {
+                assert!(matches!(
+                    &dc.mechanism,
+                    DefConflictMechanism::XPathOverlap { wildcard: true, .. }
+                ));
+                assert_eq!(conflicts[0].severity(), rcd_core::Severity::Info);
+            }
+            _ => panic!("Expected Conflict::Def"),
+        }
+    }
+
+    #[test]
+    fn wildcard_vs_wildcard_xpath_overlap_is_info() {
+        let mod_c = test_mod("test.mod.c", "Mod C");
+        let mod_d = test_mod("test.mod.d", "Mod D");
+
+        let patches = vec![
+            (
+                mod_c,
+                vec![ParsedPatchOp {
+                    op_type: PatchOpType::Replace,
+                    xpath: "Defs/ThingDef/statBases/MaxHitPoints".to_string(),
+                    source_file: "mod_c/Patches/Patches.xml".to_string(),
+                    condition: None,
+                }],
+            ),
+            (
+                mod_d,
+                vec![ParsedPatchOp {
+                    op_type: PatchOpType::Replace,
+                    xpath: "Defs/ThingDef/statBases/MaxHitPoints".to_string(),
+                    source_file: "mod_d/Patches/Patches.xml".to_string(),
+                    condition: None,
+                }],
+            ),
+        ];
+
+        let replacement_defs = HashMap::new();
+        let conflicts = detect_xpath_conflicts(&patches, &replacement_defs, None);
+
+        assert_eq!(conflicts.len(), 1);
+        match &conflicts[0] {
+            Conflict::Def(dc) => {
+                assert!(matches!(
+                    &dc.mechanism,
+                    DefConflictMechanism::XPathOverlap { wildcard: true, .. }
+                ));
+                assert_eq!(conflicts[0].severity(), rcd_core::Severity::Info);
             }
             _ => panic!("Expected Conflict::Def"),
         }

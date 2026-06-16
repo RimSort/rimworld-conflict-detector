@@ -4,7 +4,7 @@
 
 - [x] **Same-mod def replacement false positives** — When a mod has version-specific folders (e.g., `1.5/Defs/` and `Common/Defs/`), both may provide the same def. Currently flagged as a conflict between the mod and itself. Suppress when all involved mods have the same package_id.
 
-- [ ] **Wildcard XPath overlap severity** — XPaths without a `defName` predicate (e.g., `Defs/ThingDef/statBases`) match all defs of that type, generating massive warning counts (~14k+ for a 739-mod list). Downgrade wildcard-vs-specific overlaps to `Info` severity. Consider wildcard-vs-wildcard as `Info` too.
+- [x] **Wildcard XPath overlap severity** — XPaths without a `defName` predicate (e.g., `Defs/ThingDef/statBases`) match all defs of that type, generating massive warning counts (~14k+ for a 739-mod list). Downgrade wildcard-vs-specific overlaps to `Info` severity. Consider wildcard-vs-wildcard as `Info` too.
 
 ## Review Findings (minor, from adversarial review)
 

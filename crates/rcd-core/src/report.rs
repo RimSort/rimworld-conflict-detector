@@ -134,6 +134,7 @@ mod tests {
                 mechanism: DefConflictMechanism::XPathOverlap {
                     xpath_a: "a".into(),
                     xpath_b: "b".into(),
+                    wildcard: false,
                 },
                 winner: None,
                 condition: None,
@@ -178,6 +179,7 @@ mod tests {
                 mechanism: DefConflictMechanism::XPathOverlap {
                     xpath_a: "a".into(),
                     xpath_b: "b".into(),
+                    wildcard: false,
                 },
                 winner: None,
                 condition: None,
