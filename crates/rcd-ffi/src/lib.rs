@@ -118,10 +118,7 @@ pub unsafe extern "C" fn rcd_free(ptr: *mut c_char) {
 }
 
 fn error_json(msg: &str) -> *mut c_char {
-    let json = format!(
-        r#"{{"error":"{}"}}"#,
-        msg.replace('"', "\\\"").replace('\n', "\\n")
-    );
+    let json = serde_json::json!({"error": msg}).to_string();
     CString::new(json)
         .unwrap_or_else(|_| CString::new(r#"{"error":"unknown"}"#).unwrap())
         .into_raw()

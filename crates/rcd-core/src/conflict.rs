@@ -106,9 +106,19 @@ impl Conflict {
                 let has_prefix = kinds.contains(&HarmonyPatchKind::Prefix);
                 let has_transpiler = kinds.contains(&HarmonyPatchKind::Transpiler);
 
+                let mut transpiler_mods: Vec<&str> = hc
+                    .patches
+                    .iter()
+                    .filter(|p| p.patch_kind == HarmonyPatchKind::Transpiler)
+                    .map(|p| p.mod_summary.package_id.as_str())
+                    .collect();
+                transpiler_mods.sort_unstable();
+                transpiler_mods.dedup();
+                let has_multi_mod_transpilers = transpiler_mods.len() >= 2;
+
                 if hc.short_circuit_risk {
                     Severity::Error
-                } else if has_prefix && has_transpiler {
+                } else if (has_prefix && has_transpiler) || has_multi_mod_transpilers {
                     Severity::Warning
                 } else {
                     Severity::Info
@@ -292,6 +302,40 @@ mod tests {
                     mod_summary: test_mod("mod.a"),
                     dll_name: "ModA.dll".into(),
                     patch_kind: HarmonyPatchKind::Prefix,
+                    priority: 400,
+                    before: vec![],
+                    after: vec![],
+                    returns_bool: false,
+                },
+                HarmonyPatchInfo {
+                    mod_summary: test_mod("mod.b"),
+                    dll_name: "ModB.dll".into(),
+                    patch_kind: HarmonyPatchKind::Transpiler,
+                    priority: 400,
+                    before: vec![],
+                    after: vec![],
+                    returns_bool: false,
+                },
+            ],
+            short_circuit_risk: false,
+            execution_order: None,
+        });
+        assert_eq!(c.severity(), Severity::Warning);
+    }
+
+    #[test]
+    fn harmony_two_transpilers_is_warning() {
+        let c = Conflict::Harmony(HarmonyConflict {
+            target: HarmonyTarget {
+                type_name: "Pawn".into(),
+                method_name: "Kill".into(),
+                parameter_types: None,
+            },
+            patches: vec![
+                HarmonyPatchInfo {
+                    mod_summary: test_mod("mod.a"),
+                    dll_name: "ModA.dll".into(),
+                    patch_kind: HarmonyPatchKind::Transpiler,
                     priority: 400,
                     before: vec![],
                     after: vec![],

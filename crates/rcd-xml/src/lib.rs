@@ -34,7 +34,6 @@ impl Detector for XmlDetector {
             .par_iter()
             .map(|mod_data| {
                 let mod_summary = ModSummary::from(mod_data);
-                let package_id = mod_data.package_id.clone();
 
                 // Parse defs
                 let mut defs = Vec::new();
@@ -50,7 +49,7 @@ impl Detector for XmlDetector {
                         Ok(parsed_patches) => patches.extend(parsed_patches),
                         Err(e) => {
                             diagnostics.push(Diagnostic {
-                                affected_mod: Some(package_id.clone()),
+                                affected_mod: Some(mod_summary.package_id.clone()),
                                 severity: Severity::Warning,
                                 message: format!(
                                     "Failed to parse patches in {}: {}",
@@ -63,7 +62,7 @@ impl Detector for XmlDetector {
                     }
                 }
 
-                (mod_summary, package_id, defs, patches, diagnostics)
+                (mod_summary, defs, patches, diagnostics)
             })
             .collect();
 
@@ -72,10 +71,9 @@ impl Detector for XmlDetector {
         let mut all_mod_patches = Vec::new();
         let mut all_diagnostics = Vec::new();
 
-        for (mod_summary, package_id, defs, patches, diagnostics) in parsed {
+        for (mod_summary, defs, patches, diagnostics) in parsed {
             all_mod_defs.push(replacement::ModDefs {
                 mod_summary: mod_summary.clone(),
-                package_id,
                 defs,
             });
 
@@ -167,7 +165,6 @@ mod integration_tests {
                 author: None,
                 is_base_content: false,
             },
-            package_id: "test.mod.versioned".to_string(),
             defs: vec![
                 def_parser::ParsedDef {
                     def_type: "ThingDef".to_string(),

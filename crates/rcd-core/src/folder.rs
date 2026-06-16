@@ -10,6 +10,14 @@ use std::path::PathBuf;
 /// 3. Root folder (`Defs/`, `Patches/`, `Assemblies/`) — only if no version-specific folder was found
 ///
 /// Sets `m.defs_paths`, `m.patches_paths`, `m.assemblies_paths`.
+fn is_valid_game_version(v: &str) -> bool {
+    let parts: Vec<&str> = v.split('.').collect();
+    parts.len() == 2
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
 pub fn resolve_mod_folders(
     m: &mut Mod,
     game_version: Option<&str>,
@@ -18,6 +26,8 @@ pub fn resolve_mod_folders(
     m.defs_paths.clear();
     m.patches_paths.clear();
     m.assemblies_paths.clear();
+
+    let game_version = game_version.filter(|v| is_valid_game_version(v));
 
     // Helper to check if a directory exists and add it to the paths
     let add_if_exists = |paths: &mut Vec<PathBuf>, subpath: &str| {
@@ -120,6 +130,29 @@ mod tests {
         let mut m = parse_about_xml(&fixtures_path().join("mod_versioned")).unwrap();
         resolve_mod_folders(&mut m, Some("1.5"), None);
         assert!(m.defs_paths.iter().any(|p| p.ends_with("Common/Defs")));
+    }
+
+    #[test]
+    fn invalid_game_version_treated_as_none() {
+        let mut m = parse_about_xml(&fixtures_path().join("mod_versioned")).unwrap();
+        resolve_mod_folders(&mut m, Some("../../etc"), None);
+        assert!(
+            !m.defs_paths
+                .iter()
+                .any(|p| p.to_string_lossy().contains("etc")),
+            "Path traversal in game_version should be rejected"
+        );
+    }
+
+    #[test]
+    fn valid_game_version_formats() {
+        assert!(is_valid_game_version("1.5"));
+        assert!(is_valid_game_version("1.4"));
+        assert!(!is_valid_game_version("../../etc"));
+        assert!(!is_valid_game_version("1.5.3"));
+        assert!(!is_valid_game_version(""));
+        assert!(!is_valid_game_version(".5"));
+        assert!(!is_valid_game_version("1."));
     }
 
     #[test]

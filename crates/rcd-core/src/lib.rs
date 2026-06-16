@@ -9,7 +9,10 @@ pub mod report;
 pub mod severity;
 pub mod types;
 
-pub use conflict::*;
+pub use conflict::{
+    Conflict, DefConflict, DefConflictMechanism, DefTarget, HarmonyConflict, HarmonyPatchInfo,
+    HarmonyPatchKind, HarmonyTarget,
+};
 pub use detector::{Detector, Engine, ProgressFn};
 pub use diagnostic::{Diagnostic, DiagnosticSource};
 pub use report::Report;

@@ -10,7 +10,7 @@
 
 - [ ] **`--color` flag** — Parsed but never used. Add ANSI color output with a terminal coloring crate (e.g., `termcolor` or `owo-colors`). Red for ERROR, yellow for WARN, gray for INFO.
 
-- [ ] **Two transpilers = Info instead of Warning** — Multiple transpilers on the same method from different mods rarely compose correctly. Should be at least Warning severity.
+- [x] **Two transpilers = Info instead of Warning** — Multiple transpilers on the same method from different mods rarely compose correctly. Should be at least Warning severity.
 
 - [ ] **Abstract def skip diagnostic** — Spec requires an Info-level diagnostic noting how many abstract defs were skipped per mod. Currently skipped silently.
 
@@ -28,7 +28,7 @@
 
 - [ ] **Phase 2 conflict detection not parallelized** — Spec calls for parallel pairwise comparison with rayon. Currently sequential. Low priority since it's fast on in-memory data.
 
-- [ ] **`error_json` incomplete JSON escaping** — Manually escapes quotes and newlines but misses backslashes and control characters. Replace with `serde_json::json!({"error": msg}).to_string()`.
+- [x] **`error_json` incomplete JSON escaping** — Manually escapes quotes and newlines but misses backslashes and control characters. Replace with `serde_json::json!({"error": msg}).to_string()`.
 
 ## Robustness
 
@@ -44,21 +44,21 @@
 
 - [ ] **About.xml two-pass parser** — Parses XML twice (section-level fields, then top-level scalars). Could be consolidated to a single pass.
 
-- [ ] **`HashMap<String, bool>` in Report::build** — Should be `HashSet<String>`. The bool value is never read.
+- [x] **`HashMap<String, bool>` in Report::build** — Should be `HashSet<String>`. The bool value is never read.
 
 - [ ] **Inconsistent error types** — `mods_config.rs` returns `Box<dyn Error>`, `about_xml.rs` uses typed errors with thiserror, `HarmonyParseError` manually implements Display/Error. Standardize.
 
-- [ ] **`ModDefs.package_id` duplicates `ModSummary.package_id`** — Redundant field. Use `mod_summary.package_id` directly.
+- [x] **`ModDefs.package_id` duplicates `ModSummary.package_id`** — Redundant field. Use `mod_summary.package_id` directly.
 
 - [ ] **Spike test still in lib.rs** — ~470-line exploratory test with 43 println! statements. The focused tests in `attributes.rs` and `priority.rs` cover the same scenarios. Remove or move to examples/.
 
 - [ ] **Duplicated test helpers** — `test_mod()` and `fixtures_path()` copied across 5+ test modules. Consider a shared `rcd-test-utils` crate or a `tests/common/` module.
 
-- [ ] **Glob re-export of conflict module** — `pub use conflict::*` in rcd-core lib.rs unlike all other module re-exports which use explicit item lists.
+- [x] **Glob re-export of conflict module** — `pub use conflict::*` in rcd-core lib.rs unlike all other module re-exports which use explicit item lists.
 
 ## Security (low risk, local tool)
 
-- [ ] **Path traversal via `game_version`** — Used without validation in path construction. Validate against `r"^[0-9]+\.[0-9]+$"`.
+- [x] **Path traversal via `game_version`** — Used without validation in path construction. Validate against `r"^[0-9]+\.[0-9]+$"`.
 
 - [ ] **No XML depth limit** — See robustness section above.
 
@@ -81,3 +81,7 @@
 - [ ] **Pre-built conflict database** — Curated/crowdsourced database of known mod conflicts for instant results without scanning.
 
 - [ ] **Native app integration** — Embedding the Rust library in a standalone web or desktop application.
+
+- [ ] **Community Rules Database Rule Generator** - Generate community db rules from select mods.
+
+- [ ] **RimSort Integration** - TBD

@@ -1,7 +1,7 @@
 use crate::diagnostic::Diagnostic;
 use crate::{Conflict, ModSummary, Severity};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportMetadata {
@@ -43,7 +43,7 @@ impl Report {
         let mut error_count = 0u32;
         let mut warning_count = 0u32;
         let mut info_count = 0u32;
-        let mut mods_with_conflicts: HashMap<String, bool> = HashMap::new();
+        let mut mods_with_conflicts: HashSet<String> = HashSet::new();
 
         for conflict in &conflicts {
             match conflict.severity() {
@@ -52,7 +52,7 @@ impl Report {
                 Severity::Info => info_count += 1,
             }
             for m in conflict.involved_mods() {
-                mods_with_conflicts.insert(m.package_id.clone(), true);
+                mods_with_conflicts.insert(m.package_id.clone());
             }
         }
 

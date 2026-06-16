@@ -8,7 +8,6 @@ use crate::def_parser::{ParsedDef, build_attrs_string};
 #[derive(Debug, Clone)]
 pub struct ModDefs {
     pub mod_summary: ModSummary,
-    pub package_id: String,
     pub defs: Vec<ParsedDef>,
 }
 
@@ -18,18 +17,17 @@ pub struct ModDefs {
 /// When a load order is provided, the winner is determined as the last mod
 /// in the load order (RimWorld's last-wins semantics).
 pub fn detect_replacements(all_mod_defs: &[ModDefs], order: Option<&LoadOrder>) -> Vec<Conflict> {
-    // Build a map: (def_type, def_name) -> Vec<(ModSummary, package_id, raw_xml)>
-    type DefEntries = Vec<(ModSummary, String, String)>;
+    // Build a map: (def_type, def_name) -> Vec<(ModSummary, raw_xml)>
+    type DefEntries = Vec<(ModSummary, String)>;
     let mut def_map: HashMap<(String, String), DefEntries> = HashMap::new();
 
     for mod_defs in all_mod_defs {
         for def in &mod_defs.defs {
             let key = (def.def_type.clone(), def.def_name.clone());
-            def_map.entry(key).or_default().push((
-                mod_defs.mod_summary.clone(),
-                mod_defs.package_id.clone(),
-                def.raw_xml.clone(),
-            ));
+            def_map
+                .entry(key)
+                .or_default()
+                .push((mod_defs.mod_summary.clone(), def.raw_xml.clone()));
         }
     }
 
@@ -42,15 +40,15 @@ pub fn detect_replacements(all_mod_defs: &[ModDefs], order: Option<&LoadOrder>) 
 
         // Suppress false positives when a single mod provides the same def
         // from multiple folders (e.g., 1.5/Defs/ and Common/Defs/)
-        let first_pkg = &entries[0].1;
-        if entries.iter().all(|(_, pkg_id, _)| pkg_id == first_pkg) {
+        let first_pkg = &entries[0].0.package_id;
+        if entries.iter().all(|(ms, _)| ms.package_id == *first_pkg) {
             continue;
         }
 
         // Normalize whitespace for comparison: collapse all runs of whitespace to a single space
         let normalized: Vec<String> = entries
             .iter()
-            .map(|(_, _, xml)| normalize_whitespace(xml))
+            .map(|(_, xml)| normalize_whitespace(xml))
             .collect();
 
         // Check if all normalized XMLs are identical
@@ -62,12 +60,12 @@ pub fn detect_replacements(all_mod_defs: &[ModDefs], order: Option<&LoadOrder>) 
         // Find divergent fields by comparing the first entry against each subsequent one
         let divergent_fields = find_divergent_fields(entries);
 
-        let mods: Vec<ModSummary> = entries.iter().map(|(ms, _, _)| ms.clone()).collect();
+        let mods: Vec<ModSummary> = entries.iter().map(|(ms, _)| ms.clone()).collect();
 
         let winner = order.and_then(|lo| {
             entries
                 .iter()
-                .filter_map(|(ms, pkg_id, _)| lo.position(pkg_id).map(|pos| (ms, pos)))
+                .filter_map(|(ms, _)| lo.position(&ms.package_id).map(|pos| (ms, pos)))
                 .max_by_key(|(_, pos)| *pos)
                 .map(|(ms, _)| ms.package_id.clone())
         });
@@ -134,24 +132,24 @@ fn normalize_whitespace(s: &str) -> String {
 
 /// Finds fields that differ between def entries by doing a simple line-level comparison.
 /// Returns a list of tag names that appear to differ.
-fn find_divergent_fields(entries: &[(ModSummary, String, String)]) -> Vec<String> {
+fn find_divergent_fields(entries: &[(ModSummary, String)]) -> Vec<String> {
     if entries.len() < 2 {
         return Vec::new();
     }
 
-    let base_normalized = normalize_whitespace(&entries[0].2);
+    let base_normalized = normalize_whitespace(&entries[0].1);
     let mut divergent = Vec::new();
 
     for entry in &entries[1..] {
-        let other_normalized = normalize_whitespace(&entry.2);
+        let other_normalized = normalize_whitespace(&entry.1);
         if base_normalized != other_normalized {
             // Simple heuristic: find top-level child tags that differ
-            let base_tags = extract_child_tags(&entries[0].2);
-            let other_tags = extract_child_tags(&entry.2);
+            let base_tags = extract_child_tags(&entries[0].1);
+            let other_tags = extract_child_tags(&entry.1);
 
             for tag in &base_tags {
-                let base_content = extract_tag_content(&entries[0].2, tag);
-                let other_content = extract_tag_content(&entry.2, tag);
+                let base_content = extract_tag_content(&entries[0].1, tag);
+                let other_content = extract_tag_content(&entry.1, tag);
                 if base_content != other_content && !divergent.contains(tag) {
                     divergent.push(tag.clone());
                 }
@@ -291,7 +289,7 @@ mod tests {
     fn detect_direct_replacement() {
         let mod_a = ModDefs {
             mod_summary: test_mod_summary("test.mod.a", "Mod A"),
-            package_id: "test.mod.a".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -302,7 +300,7 @@ mod tests {
 
         let mod_b = ModDefs {
             mod_summary: test_mod_summary("test.mod.b", "Mod B"),
-            package_id: "test.mod.b".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -335,7 +333,7 @@ mod tests {
 
         let mod_a = ModDefs {
             mod_summary: test_mod_summary("test.mod.a", "Mod A"),
-            package_id: "test.mod.a".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -346,7 +344,7 @@ mod tests {
 
         let mod_b = ModDefs {
             mod_summary: test_mod_summary("test.mod.b", "Mod B"),
-            package_id: "test.mod.b".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -367,7 +365,7 @@ mod tests {
     fn replacement_with_load_order_reports_winner() {
         let mod_a = ModDefs {
             mod_summary: test_mod_summary("test.mod.a", "Mod A"),
-            package_id: "test.mod.a".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -378,7 +376,7 @@ mod tests {
 
         let mod_b = ModDefs {
             mod_summary: test_mod_summary("test.mod.b", "Mod B"),
-            package_id: "test.mod.b".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -414,7 +412,7 @@ mod tests {
 
         let mod_a = ModDefs {
             mod_summary: test_mod_summary("test.mod.a", "Mod A"),
-            package_id: "test.mod.a".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -425,7 +423,7 @@ mod tests {
 
         let mod_b = ModDefs {
             mod_summary: test_mod_summary("test.mod.b", "Mod B"),
-            package_id: "test.mod.b".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -446,7 +444,7 @@ mod tests {
     fn divergent_fields_detected() {
         let mod_a = ModDefs {
             mod_summary: test_mod_summary("test.mod.a", "Mod A"),
-            package_id: "test.mod.a".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -457,7 +455,7 @@ mod tests {
 
         let mod_b = ModDefs {
             mod_summary: test_mod_summary("test.mod.b", "Mod B"),
-            package_id: "test.mod.b".to_string(),
+
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
@@ -491,7 +489,7 @@ mod tests {
     fn same_mod_version_folders_no_conflict() {
         let mod_defs = ModDefs {
             mod_summary: test_mod_summary("test.mod.versioned", "Versioned Mod"),
-            package_id: "test.mod.versioned".to_string(),
+
             defs: vec![
                 ParsedDef {
                     def_type: "ThingDef".to_string(),
