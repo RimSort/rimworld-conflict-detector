@@ -112,13 +112,17 @@ fn build_replacement_map(
     for mod_defs in all_mod_defs {
         for def in &mod_defs.defs {
             let key = (def.def_type.clone(), def.def_name.clone());
-            map.entry(key)
-                .or_default()
-                .push(mod_defs.mod_summary.clone());
+            let entry = map.entry(key).or_default();
+            if !entry
+                .iter()
+                .any(|ms| ms.package_id == mod_defs.mod_summary.package_id)
+            {
+                entry.push(mod_defs.mod_summary.clone());
+            }
         }
     }
 
-    // Only keep entries with 2+ mods
+    // Only keep entries with 2+ distinct mods
     map.retain(|_, mods| mods.len() >= 2);
     map
 }
@@ -151,6 +155,69 @@ mod integration_tests {
         assert!(
             !errors.is_empty(),
             "Should detect ThingDef:Steel replacement conflict"
+        );
+    }
+
+    #[test]
+    fn same_mod_version_folders_not_in_replacement_map() {
+        let mod_defs = vec![replacement::ModDefs {
+            mod_summary: ModSummary {
+                package_id: "test.mod.versioned".to_string(),
+                name: "Versioned Mod".to_string(),
+                author: None,
+                is_base_content: false,
+            },
+            package_id: "test.mod.versioned".to_string(),
+            defs: vec![
+                def_parser::ParsedDef {
+                    def_type: "ThingDef".to_string(),
+                    def_name: "VersionedItem".to_string(),
+                    raw_xml: "<ThingDef><defName>VersionedItem</defName></ThingDef>".to_string(),
+                    source_file: "1.5/Defs/ThingDefs.xml".to_string(),
+                },
+                def_parser::ParsedDef {
+                    def_type: "ThingDef".to_string(),
+                    def_name: "VersionedItem".to_string(),
+                    raw_xml:
+                        "<ThingDef><defName>VersionedItem</defName><label>legacy</label></ThingDef>"
+                            .to_string(),
+                    source_file: "Common/Defs/ThingDefs.xml".to_string(),
+                },
+            ],
+        }];
+
+        let map = build_replacement_map(&mod_defs);
+        assert!(
+            map.is_empty(),
+            "Same mod providing a def from multiple folders should not appear in replacement map"
+        );
+    }
+
+    #[test]
+    fn versioned_mod_no_self_conflict() {
+        let mods = discover_mods(&[fixtures_path()], Some("1.5"));
+        let versioned = mods.iter().find(|m| m.package_id == "test.mod.versioned");
+        assert!(versioned.is_some(), "Should find versioned fixture mod");
+
+        let detector = XmlDetector;
+        let (conflicts, _) = detector.analyze(&mods, None);
+
+        let self_conflicts: Vec<_> = conflicts
+            .iter()
+            .filter(|c| {
+                let involved = c.involved_mods();
+                involved.len() >= 2
+                    && involved
+                        .iter()
+                        .all(|m| m.package_id == "test.mod.versioned")
+            })
+            .collect();
+
+        assert_eq!(
+            self_conflicts.len(),
+            0,
+            "Versioned mod should not conflict with itself: {:?}",
+            self_conflicts
         );
     }
 }

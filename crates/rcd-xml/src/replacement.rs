@@ -40,6 +40,13 @@ pub fn detect_replacements(all_mod_defs: &[ModDefs], order: Option<&LoadOrder>) 
             continue;
         }
 
+        // Suppress false positives when a single mod provides the same def
+        // from multiple folders (e.g., 1.5/Defs/ and Common/Defs/)
+        let first_pkg = &entries[0].1;
+        if entries.iter().all(|(_, pkg_id, _)| pkg_id == first_pkg) {
+            continue;
+        }
+
         // Normalize whitespace for comparison: collapse all runs of whitespace to a single space
         let normalized: Vec<String> = entries
             .iter()
@@ -478,5 +485,34 @@ mod tests {
             },
             _ => panic!("Expected Conflict::Def"),
         }
+    }
+
+    #[test]
+    fn same_mod_version_folders_no_conflict() {
+        let mod_defs = ModDefs {
+            mod_summary: test_mod_summary("test.mod.versioned", "Versioned Mod"),
+            package_id: "test.mod.versioned".to_string(),
+            defs: vec![
+                ParsedDef {
+                    def_type: "ThingDef".to_string(),
+                    def_name: "VersionedItem".to_string(),
+                    raw_xml: "<ThingDef><defName>VersionedItem</defName></ThingDef>".to_string(),
+                    source_file: "mod_versioned/1.5/Defs/ThingDefs.xml".to_string(),
+                },
+                ParsedDef {
+                    def_type: "ThingDef".to_string(),
+                    def_name: "VersionedItem".to_string(),
+                    raw_xml: "<ThingDef><defName>VersionedItem</defName><label>versioned item (legacy)</label></ThingDef>".to_string(),
+                    source_file: "mod_versioned/Common/Defs/ThingDefs.xml".to_string(),
+                },
+            ],
+        };
+
+        let conflicts = detect_replacements(&[mod_defs], None);
+        assert_eq!(
+            conflicts.len(),
+            0,
+            "Same mod providing a def from multiple folders should not produce a conflict"
+        );
     }
 }
