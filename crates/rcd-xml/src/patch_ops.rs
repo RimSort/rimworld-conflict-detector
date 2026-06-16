@@ -166,10 +166,10 @@ fn read_xpath_from_operation(reader: &mut Reader<&[u8]>) -> Option<String> {
                 if depth == 2 && tag == "xpath" {
                     // Read the text content of <xpath>
                     let mut text_buf = Vec::new();
-                    if let Ok(Event::Text(t)) = reader.read_event_into(&mut text_buf) {
-                        if let Ok(text) = t.unescape() {
-                            xpath = Some(text.trim().to_string());
-                        }
+                    if let Ok(Event::Text(t)) = reader.read_event_into(&mut text_buf)
+                        && let Ok(text) = t.unescape()
+                    {
+                        xpath = Some(text.trim().to_string());
                     }
                     // Consume closing </xpath>
                     let mut end_buf = Vec::new();
@@ -211,12 +211,12 @@ fn parse_sequence(
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
 
                 // <li Class="PatchOperationReplace"> inside <operations>
-                if tag == "li" {
-                    if let Some(class) = extract_class_attr(e) {
-                        parse_operation(reader, &class, source, condition.clone(), ops);
-                        // parse_operation consumed through the closing </li>, so adjust depth
-                        depth -= 1;
-                    }
+                if tag == "li"
+                    && let Some(class) = extract_class_attr(e)
+                {
+                    parse_operation(reader, &class, source, condition.clone(), ops);
+                    // parse_operation consumed through the closing </li>, so adjust depth
+                    depth -= 1;
                 }
             }
             Ok(Event::End(_)) => {
@@ -291,10 +291,10 @@ fn read_li_text_list(reader: &mut Reader<&[u8]>) -> Vec<String> {
                 if tag == "li" && depth == 2 {
                     // Read the text
                     let mut text_buf = Vec::new();
-                    if let Ok(Event::Text(t)) = reader.read_event_into(&mut text_buf) {
-                        if let Ok(text) = t.unescape() {
-                            items.push(text.trim().to_string());
-                        }
+                    if let Ok(Event::Text(t)) = reader.read_event_into(&mut text_buf)
+                        && let Ok(text) = t.unescape()
+                    {
+                        items.push(text.trim().to_string());
                     }
                     // Consume </li>
                     let mut end_buf = Vec::new();

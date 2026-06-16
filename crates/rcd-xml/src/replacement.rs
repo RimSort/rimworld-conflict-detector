@@ -19,7 +19,8 @@ pub struct ModDefs {
 /// in the load order (RimWorld's last-wins semantics).
 pub fn detect_replacements(all_mod_defs: &[ModDefs], order: Option<&LoadOrder>) -> Vec<Conflict> {
     // Build a map: (def_type, def_name) -> Vec<(ModSummary, package_id, raw_xml)>
-    let mut def_map: HashMap<(String, String), Vec<(ModSummary, String, String)>> = HashMap::new();
+    type DefEntries = Vec<(ModSummary, String, String)>;
+    let mut def_map: HashMap<(String, String), DefEntries> = HashMap::new();
 
     for mod_defs in all_mod_defs {
         for def in &mod_defs.defs {
@@ -234,10 +235,10 @@ fn extract_tag_content(xml: &str, target_tag: &str) -> Option<String> {
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if capture_depth.is_some() {
-                    if let Ok(text) = t.unescape() {
-                        captured.push_str(&text);
-                    }
+                if capture_depth.is_some()
+                    && let Ok(text) = t.unescape()
+                {
+                    captured.push_str(&text);
                 }
             }
             Ok(Event::End(ref e)) => {

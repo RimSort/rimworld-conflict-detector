@@ -32,13 +32,13 @@ pub fn normalize_xpath(xpath: &str) -> NormalizedXPath {
         }
 
         // Look for a segment ending with "Def" (might have predicate)
-        if segment.contains("Def") {
-            if let Some((dt, dn)) = parse_def_predicate(segment) {
-                def_type = Some(dt);
-                def_name = dn;
-                field_path_start = Some(i + 1);
-                break;
-            }
+        if segment.contains("Def")
+            && let Some((dt, dn)) = parse_def_predicate(segment)
+        {
+            def_type = Some(dt);
+            def_name = dn;
+            field_path_start = Some(i + 1);
+            break;
         }
     }
 
@@ -96,16 +96,14 @@ fn extract_def_name_predicate(predicate: &str) -> Option<String> {
         let after_eq = after_defname[1..].trim_start();
 
         // Extract quoted value
-        if after_eq.starts_with('"') {
-            // Find closing quote
-            if let Some(end_quote) = after_eq[1..].find('"') {
-                return Some(after_eq[1..end_quote + 1].to_string());
-            }
-        } else if after_eq.starts_with('\'') {
-            // Find closing quote
-            if let Some(end_quote) = after_eq[1..].find('\'') {
-                return Some(after_eq[1..end_quote + 1].to_string());
-            }
+        if let Some(stripped) = after_eq.strip_prefix('"')
+            && let Some(end_quote) = stripped.find('"')
+        {
+            return Some(stripped[..end_quote].to_string());
+        } else if let Some(stripped) = after_eq.strip_prefix('\'')
+            && let Some(end_quote) = stripped.find('\'')
+        {
+            return Some(stripped[..end_quote].to_string());
         }
     }
 

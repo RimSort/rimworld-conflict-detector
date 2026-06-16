@@ -230,22 +230,20 @@ fn merge_harmony_patch_args(
                     *target_method = Some(s.to_string());
                 }
             }
-            FixedArg::Array(_, Some(elements)) => {
+            FixedArg::Array(_, Some(elements)) if parameter_types.is_none() => {
                 // Type[] argument — parameter types for overload disambiguation.
-                if parameter_types.is_none() {
-                    let types: Vec<String> = elements
-                        .iter()
-                        .filter_map(|elem| match elem {
-                            FixedArg::Type(type_name) => {
-                                let simple = type_name.split(',').next().unwrap_or(type_name);
-                                Some(simple.to_string())
-                            }
-                            _ => None,
-                        })
-                        .collect();
-                    if !types.is_empty() {
-                        *parameter_types = Some(types);
-                    }
+                let types: Vec<String> = elements
+                    .iter()
+                    .filter_map(|elem| match elem {
+                        FixedArg::Type(type_name) => {
+                            let simple = type_name.split(',').next().unwrap_or(type_name);
+                            Some(simple.to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if !types.is_empty() {
+                    *parameter_types = Some(types);
                 }
             }
             _ => {}

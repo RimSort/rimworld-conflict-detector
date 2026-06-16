@@ -53,7 +53,7 @@ fn report_json_is_valid() {
     let report = run_analysis(&mods, None);
     let json = serde_json::to_string_pretty(&report).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-    assert!(parsed["conflicts"].as_array().unwrap().len() > 0);
+    assert!(!parsed["conflicts"].as_array().unwrap().is_empty());
 }
 
 #[test]

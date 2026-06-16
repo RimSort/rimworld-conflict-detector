@@ -11,69 +11,69 @@ pub fn validate_load_order(mods: &[Mod], order: &LoadOrder) -> Vec<Diagnostic> {
 
         // loadAfter: this mod should load AFTER the listed mods
         for dep in &m.load_after {
-            if let Some(dep_pos) = order.position(dep) {
-                if my_pos < dep_pos {
-                    diagnostics.push(Diagnostic {
-                        affected_mod: Some(m.package_id.clone()),
-                        severity: Severity::Warning,
-                        message: format!(
-                            "'{}' declares loadAfter '{}' but is loaded before it",
-                            m.package_id, dep
-                        ),
-                        source: DiagnosticSource::MetadataResolution,
-                    });
-                }
+            if let Some(dep_pos) = order.position(dep)
+                && my_pos < dep_pos
+            {
+                diagnostics.push(Diagnostic {
+                    affected_mod: Some(m.package_id.clone()),
+                    severity: Severity::Warning,
+                    message: format!(
+                        "'{}' declares loadAfter '{}' but is loaded before it",
+                        m.package_id, dep
+                    ),
+                    source: DiagnosticSource::MetadataResolution,
+                });
             }
         }
 
         // loadBefore: this mod should load BEFORE the listed mods
         for dep in &m.load_before {
-            if let Some(dep_pos) = order.position(dep) {
-                if my_pos > dep_pos {
-                    diagnostics.push(Diagnostic {
-                        affected_mod: Some(m.package_id.clone()),
-                        severity: Severity::Warning,
-                        message: format!(
-                            "'{}' declares loadBefore '{}' but is loaded after it",
-                            m.package_id, dep
-                        ),
-                        source: DiagnosticSource::MetadataResolution,
-                    });
-                }
+            if let Some(dep_pos) = order.position(dep)
+                && my_pos > dep_pos
+            {
+                diagnostics.push(Diagnostic {
+                    affected_mod: Some(m.package_id.clone()),
+                    severity: Severity::Warning,
+                    message: format!(
+                        "'{}' declares loadBefore '{}' but is loaded after it",
+                        m.package_id, dep
+                    ),
+                    source: DiagnosticSource::MetadataResolution,
+                });
             }
         }
 
         // forceLoadAfter: hard constraint — use Error severity
         for dep in &m.force_load_after {
-            if let Some(dep_pos) = order.position(dep) {
-                if my_pos < dep_pos {
-                    diagnostics.push(Diagnostic {
-                        affected_mod: Some(m.package_id.clone()),
-                        severity: Severity::Error,
-                        message: format!(
-                            "'{}' declares forceLoadAfter '{}' but is loaded before it (hard constraint violated)",
-                            m.package_id, dep
-                        ),
-                        source: DiagnosticSource::MetadataResolution,
-                    });
-                }
+            if let Some(dep_pos) = order.position(dep)
+                && my_pos < dep_pos
+            {
+                diagnostics.push(Diagnostic {
+                    affected_mod: Some(m.package_id.clone()),
+                    severity: Severity::Error,
+                    message: format!(
+                        "'{}' declares forceLoadAfter '{}' but is loaded before it (hard constraint violated)",
+                        m.package_id, dep
+                    ),
+                    source: DiagnosticSource::MetadataResolution,
+                });
             }
         }
 
         // forceLoadBefore: hard constraint — use Error severity
         for dep in &m.force_load_before {
-            if let Some(dep_pos) = order.position(dep) {
-                if my_pos > dep_pos {
-                    diagnostics.push(Diagnostic {
-                        affected_mod: Some(m.package_id.clone()),
-                        severity: Severity::Error,
-                        message: format!(
-                            "'{}' declares forceLoadBefore '{}' but is loaded after it (hard constraint violated)",
-                            m.package_id, dep
-                        ),
-                        source: DiagnosticSource::MetadataResolution,
-                    });
-                }
+            if let Some(dep_pos) = order.position(dep)
+                && my_pos > dep_pos
+            {
+                diagnostics.push(Diagnostic {
+                    affected_mod: Some(m.package_id.clone()),
+                    severity: Severity::Error,
+                    message: format!(
+                        "'{}' declares forceLoadBefore '{}' but is loaded after it (hard constraint violated)",
+                        m.package_id, dep
+                    ),
+                    source: DiagnosticSource::MetadataResolution,
+                });
             }
         }
     }

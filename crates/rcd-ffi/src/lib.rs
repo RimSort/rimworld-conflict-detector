@@ -10,17 +10,21 @@ pub type ProgressCallback = extern "C" fn(current: u32, total: u32, phase: *cons
 /// Takes a JSON config string specifying mod paths and options.
 /// Returns a JSON report string. Always returns valid JSON.
 /// The caller must free the returned string with `rcd_free`.
+///
+/// # Safety
+///
+/// `config_json` must be a valid, null-terminated C string or null.
 #[unsafe(no_mangle)]
-pub extern "C" fn rcd_analyze(
+pub unsafe extern "C" fn rcd_analyze(
     config_json: *const c_char,
     progress: Option<ProgressCallback>,
 ) -> *mut c_char {
     let result = std::panic::catch_unwind(|| {
-        let config_str = unsafe {
+        let config_str = {
             if config_json.is_null() {
                 return error_json("config_json is null");
             }
-            match CStr::from_ptr(config_json).to_str() {
+            match unsafe { CStr::from_ptr(config_json) }.to_str() {
                 Ok(s) => s.to_owned(),
                 Err(e) => return error_json(&format!("Invalid UTF-8 in config: {}", e)),
             }
@@ -102,12 +106,14 @@ pub extern "C" fn rcd_analyze(
 }
 
 /// Free a string previously returned by `rcd_analyze`.
+///
+/// # Safety
+///
+/// `ptr` must be a pointer previously returned by `rcd_analyze`, or null.
 #[unsafe(no_mangle)]
-pub extern "C" fn rcd_free(ptr: *mut c_char) {
+pub unsafe extern "C" fn rcd_free(ptr: *mut c_char) {
     if !ptr.is_null() {
-        unsafe {
-            drop(CString::from_raw(ptr));
-        }
+        drop(unsafe { CString::from_raw(ptr) });
     }
 }
 
@@ -128,30 +134,30 @@ mod tests {
 
     #[test]
     fn null_config_returns_error() {
-        let result = rcd_analyze(std::ptr::null(), None);
+        let result = unsafe { rcd_analyze(std::ptr::null(), None) };
         assert!(!result.is_null());
         let result_str = unsafe { CStr::from_ptr(result).to_str().unwrap().to_owned() };
-        rcd_free(result);
+        unsafe { rcd_free(result) };
         assert!(result_str.contains("error"));
     }
 
     #[test]
     fn invalid_json_returns_error() {
         let config = CString::new("not json").unwrap();
-        let result = rcd_analyze(config.as_ptr(), None);
+        let result = unsafe { rcd_analyze(config.as_ptr(), None) };
         assert!(!result.is_null());
         let result_str = unsafe { CStr::from_ptr(result).to_str().unwrap().to_owned() };
-        rcd_free(result);
+        unsafe { rcd_free(result) };
         assert!(result_str.contains("error"));
     }
 
     #[test]
     fn empty_config_returns_valid_report() {
         let config = CString::new(r#"{"mod_paths": []}"#).unwrap();
-        let result = rcd_analyze(config.as_ptr(), None);
+        let result = unsafe { rcd_analyze(config.as_ptr(), None) };
         assert!(!result.is_null());
         let result_str = unsafe { CStr::from_ptr(result).to_str().unwrap().to_owned() };
-        rcd_free(result);
+        unsafe { rcd_free(result) };
 
         // Should parse as valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&result_str).unwrap();
