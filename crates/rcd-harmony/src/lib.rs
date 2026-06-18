@@ -38,7 +38,15 @@ impl Detector for HarmonyDetector {
                 let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
                 for assemblies_path in &m.assemblies_paths {
-                    let dlls = discover_assemblies(assemblies_path);
+                    let (dlls, discovery_errors) = discover_assemblies(assemblies_path);
+                    for err_msg in discovery_errors {
+                        diagnostics.push(Diagnostic {
+                            affected_mod: Some(mod_summary.package_id.clone()),
+                            severity: Severity::Warning,
+                            message: err_msg,
+                            source: DiagnosticSource::DllParsing,
+                        });
+                    }
 
                     for dll_path in dlls {
                         let dll_name = dll_path

@@ -15,37 +15,57 @@ const SKIP_PREFIXES: &[&str] = &[
 ///
 /// Walks the directory (non-recursively) and returns paths to `.dll` files
 /// whose file stem does not start with any of the known framework prefixes.
-pub fn discover_assemblies(assemblies_dir: &Path) -> Vec<PathBuf> {
+/// Also collects I/O errors encountered during the walk.
+pub fn discover_assemblies(assemblies_dir: &Path) -> (Vec<PathBuf>, Vec<String>) {
+    let mut paths = Vec::new();
+    let mut errors = Vec::new();
+
     let walker = match walkdir::WalkDir::new(assemblies_dir)
         .max_depth(1)
         .into_iter()
         .next()
     {
-        // If the directory itself doesn't exist, return empty
         Some(Ok(_)) => walkdir::WalkDir::new(assemblies_dir).max_depth(1),
-        _ => return Vec::new(),
+        Some(Err(e)) => {
+            errors.push(format!("Failed to read assemblies directory: {}", e));
+            return (paths, errors);
+        }
+        None => return (paths, errors),
     };
 
-    walker
-        .into_iter()
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
-        })
-        .filter(|entry| {
-            let stem = entry
-                .path()
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("");
-            !SKIP_PREFIXES.iter().any(|prefix| stem.starts_with(prefix))
-        })
-        .map(|entry| entry.into_path())
-        .collect()
+    for result in walker.into_iter() {
+        let entry = match result {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push(format!("Failed to read directory entry: {}", e));
+                continue;
+            }
+        };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if !entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
+        {
+            continue;
+        }
+
+        let stem = entry
+            .path()
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        if SKIP_PREFIXES.iter().any(|prefix| stem.starts_with(prefix)) {
+            continue;
+        }
+
+        paths.push(entry.into_path());
+    }
+
+    (paths, errors)
 }
 
 #[cfg(test)]
@@ -68,7 +88,8 @@ mod tests {
         fs::write(dir.path().join("MyMod.dll"), b"").unwrap();
         fs::write(dir.path().join("SomePatches.dll"), b"").unwrap();
 
-        let mut found = discover_assemblies(dir.path());
+        let (mut found, errors) = discover_assemblies(dir.path());
+        assert!(errors.is_empty());
         found.sort();
 
         let names: Vec<&str> = found
@@ -80,7 +101,7 @@ mod tests {
 
     #[test]
     fn nonexistent_directory_returns_empty() {
-        let result = discover_assemblies(Path::new("/nonexistent/assemblies/dir"));
+        let (result, _errors) = discover_assemblies(Path::new("/nonexistent/assemblies/dir"));
         assert!(result.is_empty());
     }
 
@@ -91,8 +112,19 @@ mod tests {
         fs::write(dir.path().join("config.xml"), b"").unwrap();
         fs::write(dir.path().join("MyMod.dll"), b"").unwrap();
 
-        let found = discover_assemblies(dir.path());
+        let (found, errors) = discover_assemblies(dir.path());
+        assert!(errors.is_empty());
         assert_eq!(found.len(), 1);
         assert!(found[0].file_name().unwrap().to_str().unwrap() == "MyMod.dll");
+    }
+
+    #[test]
+    fn discover_assemblies_returns_errors_vec() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("MyMod.dll"), b"").unwrap();
+
+        let (found, errors) = discover_assemblies(dir.path());
+        assert_eq!(found.len(), 1);
+        assert!(errors.is_empty());
     }
 }
