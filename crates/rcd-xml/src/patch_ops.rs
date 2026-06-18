@@ -141,6 +141,9 @@ fn parse_operation(
         "PatchOperationFindMod" => {
             parse_find_mod(reader, source, ops);
         }
+        "PatchOperationConditional" => {
+            parse_conditional(reader, source, condition, ops);
+        }
         _ => {
             // Unknown operation type — skip it. We don't know the enclosing
             // tag name, but we track depth to find the matching end tag.
@@ -260,6 +263,49 @@ fn parse_find_mod(reader: &mut Reader<&[u8]>, source: &str, ops: &mut Vec<Parsed
                         parse_operation(reader, &class, source, condition, ops);
                         depth -= 1; // parse_operation consumed through </match>
                     }
+                }
+            }
+            Ok(Event::End(_)) => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => break,
+            _ => {}
+        }
+        buf.clear();
+    }
+}
+
+/// Parse `PatchOperationConditional`: has an `<xpath>` test, and `<match>` / `<nomatch>`
+/// child operations. For static analysis we cannot evaluate the test, so we extract
+/// operations from both branches.
+fn parse_conditional(
+    reader: &mut Reader<&[u8]>,
+    source: &str,
+    condition: Option<PatchCondition>,
+    ops: &mut Vec<ParsedPatchOp>,
+) {
+    let mut depth: u32 = 1;
+    let mut buf = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) => {
+                depth += 1;
+                let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
+
+                if depth == 2 && (tag == "match" || tag == "nomatch") {
+                    if let Some(class) = extract_class_attr(e) {
+                        parse_operation(reader, &class, source, condition.clone(), ops);
+                        depth -= 1;
+                    }
+                } else if depth == 2 && tag == "xpath" {
+                    // Skip the test xpath — we don't evaluate it
+                    skip_current_element_by_depth(reader);
+                    depth -= 1;
                 }
             }
             Ok(Event::End(_)) => {
@@ -511,5 +557,124 @@ mod tests {
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].op_type, PatchOpType::Replace);
         assert!(ops[0].xpath.contains("Wood"));
+    }
+
+    #[test]
+    fn parse_conditional_match_only() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<Patch>
+    <Operation Class="PatchOperationConditional">
+        <xpath>Defs/ThingDef[defName="Steel"]/comps</xpath>
+        <match Class="PatchOperationAdd">
+            <xpath>Defs/ThingDef[defName="Steel"]/comps</xpath>
+            <value><li><compClass>MyComp</compClass></li></value>
+        </match>
+    </Operation>
+</Patch>"#;
+
+        let ops = parse_patches_from_xml(xml, "test.xml");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].op_type, PatchOpType::Add);
+        assert_eq!(ops[0].xpath, r#"Defs/ThingDef[defName="Steel"]/comps"#);
+        assert!(ops[0].condition.is_none());
+    }
+
+    #[test]
+    fn parse_conditional_nomatch_only() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<Patch>
+    <Operation Class="PatchOperationConditional">
+        <xpath>Defs/ThingDef[defName="Steel"]/comps</xpath>
+        <nomatch Class="PatchOperationAdd">
+            <xpath>Defs/ThingDef[defName="Steel"]</xpath>
+            <value><comps><li><compClass>MyComp</compClass></li></comps></value>
+        </nomatch>
+    </Operation>
+</Patch>"#;
+
+        let ops = parse_patches_from_xml(xml, "test.xml");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].op_type, PatchOpType::Add);
+        assert_eq!(ops[0].xpath, r#"Defs/ThingDef[defName="Steel"]"#);
+        assert!(ops[0].condition.is_none());
+    }
+
+    #[test]
+    fn parse_conditional_both_branches() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<Patch>
+    <Operation Class="PatchOperationConditional">
+        <xpath>Defs/ThingDef[defName="Steel"]/comps</xpath>
+        <match Class="PatchOperationAdd">
+            <xpath>Defs/ThingDef[defName="Steel"]/comps</xpath>
+            <value><li><compClass>MyComp</compClass></li></value>
+        </match>
+        <nomatch Class="PatchOperationAdd">
+            <xpath>Defs/ThingDef[defName="Steel"]</xpath>
+            <value><comps><li><compClass>MyComp</compClass></li></comps></value>
+        </nomatch>
+    </Operation>
+</Patch>"#;
+
+        let ops = parse_patches_from_xml(xml, "test.xml");
+        assert_eq!(
+            ops.len(),
+            2,
+            "Both match and nomatch should produce operations"
+        );
+        assert_eq!(ops[0].op_type, PatchOpType::Add);
+        assert_eq!(ops[0].xpath, r#"Defs/ThingDef[defName="Steel"]/comps"#);
+        assert_eq!(ops[1].op_type, PatchOpType::Add);
+        assert_eq!(ops[1].xpath, r#"Defs/ThingDef[defName="Steel"]"#);
+    }
+
+    #[test]
+    fn parse_conditional_with_nested_sequence() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<Patch>
+    <Operation Class="PatchOperationConditional">
+        <xpath>Defs/ThingDef[defName="Steel"]/comps</xpath>
+        <nomatch Class="PatchOperationSequence">
+            <operations>
+                <li Class="PatchOperationAdd">
+                    <xpath>Defs/ThingDef[defName="Steel"]</xpath>
+                    <value><comps /></value>
+                </li>
+                <li Class="PatchOperationAdd">
+                    <xpath>Defs/ThingDef[defName="Steel"]/comps</xpath>
+                    <value><li><compClass>MyComp</compClass></li></value>
+                </li>
+            </operations>
+        </nomatch>
+    </Operation>
+</Patch>"#;
+
+        let ops = parse_patches_from_xml(xml, "test.xml");
+        assert_eq!(
+            ops.len(),
+            2,
+            "Sequence inside nomatch should produce 2 operations"
+        );
+        assert_eq!(ops[0].op_type, PatchOpType::Add);
+        assert_eq!(ops[1].op_type, PatchOpType::Add);
+    }
+
+    #[test]
+    fn parse_mod_e_conditional_patch() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tests/fixtures/mods/mod_e/Patches");
+
+        let ops = parse_patches_dir(&fixtures).expect("should parse patches dir");
+        assert_eq!(
+            ops.len(),
+            2,
+            "mod_e conditional should produce 2 operations (match + nomatch)"
+        );
+        assert_eq!(ops[0].op_type, PatchOpType::Add);
+        assert_eq!(ops[1].op_type, PatchOpType::Add);
     }
 }

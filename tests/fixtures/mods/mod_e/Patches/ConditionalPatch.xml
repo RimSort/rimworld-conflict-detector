@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Patch>
+    <Operation Class="PatchOperationConditional">
+        <xpath>Defs/ThingDef[defName="Steel"]/comps</xpath>
+        <match Class="PatchOperationAdd">
+            <xpath>Defs/ThingDef[defName="Steel"]/comps</xpath>
+            <value>
+                <li>
+                    <compClass>TestComp</compClass>
+                </li>
+            </value>
+        </match>
+        <nomatch Class="PatchOperationAdd">
+            <xpath>Defs/ThingDef[defName="Steel"]</xpath>
+            <value>
+                <comps>
+                    <li>
+                        <compClass>TestComp</compClass>
+                    </li>
+                </comps>
+            </value>
+        </nomatch>
+    </Operation>
+</Patch>
