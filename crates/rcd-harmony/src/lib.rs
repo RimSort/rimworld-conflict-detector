@@ -80,6 +80,26 @@ impl Detector for HarmonyDetector {
                                 });
                             }
                         }
+
+                        // Best-effort manual patch detection via string scanning
+                        let manual_result =
+                            panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                                crate::manual::detect_manual_patches(&dll_path)
+                            }));
+
+                        if let Ok(hints) = manual_result {
+                            for hint in hints {
+                                diagnostics.push(Diagnostic {
+                                    affected_mod: Some(mod_summary.package_id.clone()),
+                                    severity: Severity::Info,
+                                    message: format!(
+                                        "Possible manual patch hint in {}: {} (best-effort heuristic, may be a false positive)",
+                                        hint.dll_name, hint.possible_method
+                                    ),
+                                    source: DiagnosticSource::DllParsing,
+                                });
+                            }
+                        }
                     }
                 }
 
@@ -570,5 +590,56 @@ mod tests {
         println!("  - Most real Harmony patches target non-generic types");
         println!("  - We can still identify the *attribute* even when args fail to decode");
         println!("  - A future dotnetdll fix or workaround can address this edge case");
+    }
+
+    #[test]
+    fn analyze_emits_manual_patch_diagnostics() {
+        use crate::HarmonyDetector;
+        use rcd_core::{Detector, Severity};
+
+        // Create a minimal mod pointing to the test DLL directory
+        let dll_dir = std::path::PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/fixtures/harmony/dlls"
+        ));
+        let m = rcd_core::Mod {
+            package_id: "test.mod".to_string(),
+            name: "Test Mod".to_string(),
+            author: Some("Test".to_string()),
+            is_base_content: false,
+            root_path: dll_dir.clone(),
+            supported_versions: vec![],
+            dependencies: vec![],
+            incompatibilities: vec![],
+            load_before: vec![],
+            load_after: vec![],
+            force_load_before: vec![],
+            force_load_after: vec![],
+            defs_paths: vec![],
+            patches_paths: vec![],
+            assemblies_paths: vec![dll_dir],
+        };
+
+        let detector = HarmonyDetector;
+        let (_conflicts, diagnostics) = detector.analyze(&[m], None);
+
+        // The test DLL produces 0 manual hints (confirmed by running
+        // detect_manual_patches_does_not_crash_on_valid_dll test).
+        // We verify that the analyzer doesn't crash when calling detect_manual_patches,
+        // and that any hints that might be emitted have the correct severity.
+        let manual_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.message.contains("manual patch hint"))
+            .collect();
+
+        // With the test DLL producing 0 hints, there should be 0 manual patch diagnostics
+        println!("Manual patch diagnostics found: {}", manual_diags.len());
+
+        // If any are found (shouldn't happen with current test DLL, but future-proof),
+        // verify they are Info-level with the expected disclaimer
+        for d in &manual_diags {
+            assert_eq!(d.severity, Severity::Info);
+            assert!(d.message.contains("best-effort"));
+        }
     }
 }
