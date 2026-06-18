@@ -4,6 +4,7 @@
 // - PatchOperationReplace, PatchOperationAdd, PatchOperationRemove, PatchOperationInsert
 // - PatchOperationSequence (recursive extraction of nested operations)
 // - PatchOperationFindMod (conditional operations gated on mod presence)
+// - PatchOperationConditional (XPath test with match/nomatch branches)
 
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;

@@ -8,23 +8,23 @@
 
 ## Review Findings (minor, from adversarial review)
 
-- [ ] **`--color` flag** — Parsed but never used. Add ANSI color output with a terminal coloring crate (e.g., `termcolor` or `owo-colors`). Red for ERROR, yellow for WARN, gray for INFO.
+- [x] **`--color` flag** — Parsed but never used. Add ANSI color output with a terminal coloring crate (e.g., `termcolor` or `owo-colors`). Red for ERROR, yellow for WARN, gray for INFO.
 
 - [x] **Two transpilers = Info instead of Warning** — Multiple transpilers on the same method from different mods rarely compose correctly. Should be at least Warning severity.
 
-- [ ] **Abstract def skip diagnostic** — Spec requires an Info-level diagnostic noting how many abstract defs were skipped per mod. Currently skipped silently.
+- [x] **Abstract def skip diagnostic** — Spec requires an Info-level diagnostic noting how many abstract defs were skipped per mod. Currently skipped silently.
 
 - [ ] **Non-overlapping same-def XPath Info conflicts** — Spec says XPath patches on the same def but non-overlapping nodes should be `Info`. Currently not emitted at all (deliberate simplification, but spec-noncompliant).
 
-- [ ] **Manual Harmony patch detection not integrated** — `manual.rs` with `detect_manual_patches()` exists and has tests, but `HarmonyDetector::analyze` never calls it. Wire it in, flag results as `Info` with best-effort disclaimer.
+- [x] **Manual Harmony patch detection not integrated** — `manual.rs` with `detect_manual_patches()` exists and has tests, but `HarmonyDetector::analyze` never calls it. Wire it in, flag results as `Info` with best-effort disclaimer.
 
-- [ ] **`PatchOperationConditional` not handled** — Falls through to wildcard skip. Should parse the XPath test and execute match/nomatch children similar to `PatchOperationFindMod`.
+- [x] **`PatchOperationConditional` not handled** — Falls through to wildcard skip. Should parse the XPath test and execute match/nomatch children similar to `PatchOperationFindMod`.
 
 - [ ] **`PatchOperationSequence` success attribute** — Parsed but the `success` attribute is not read or used. For static analysis the safer direction is to assume all operations execute, but documenting the limitation would help.
 
-- [ ] **`is_base_content` only set in `--config` mode** — `--dir` and `--mods` modes never mark Core/DLC mods. Apply the `ludeon.*` heuristic in all resolution paths.
+- [x] **`is_base_content` only set in `--config` mode** — `--dir` and `--mods` modes never mark Core/DLC mods. Apply the `ludeon.*` heuristic in all resolution paths.
 
-- [ ] **FFI timestamp empty** — `rcd_analyze` sets `timestamp: String::new()`. Should use a real ISO 8601 timestamp (add chrono as an rcd-ffi dependency or pass it through the config JSON).
+- [x] **FFI timestamp empty** — `rcd_analyze` sets `timestamp: String::new()`. Should use a real ISO 8601 timestamp (add chrono as an rcd-ffi dependency or pass it through the config JSON).
 
 - [ ] **Phase 2 conflict detection not parallelized** — Spec calls for parallel pairwise comparison with rayon. Currently sequential. Low priority since it's fast on in-memory data.
 
@@ -50,7 +50,7 @@
 
 - [x] **`ModDefs.package_id` duplicates `ModSummary.package_id`** — Redundant field. Use `mod_summary.package_id` directly.
 
-- [ ] **Spike test still in lib.rs** — ~470-line exploratory test with 43 println! statements. The focused tests in `attributes.rs` and `priority.rs` cover the same scenarios. Remove or move to examples/.
+- [x] **Spike test still in lib.rs** — ~470-line exploratory test with 43 println! statements. The focused tests in `attributes.rs` and `priority.rs` cover the same scenarios. Remove or move to examples/.
 
 - [ ] **Duplicated test helpers** — `test_mod()` and `fixtures_path()` copied across 5+ test modules. Consider a shared `rcd-test-utils` crate or a `tests/common/` module.
 
