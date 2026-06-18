@@ -91,22 +91,14 @@ impl Report {
 mod tests {
     use super::*;
     use crate::conflict::*;
-
-    fn test_mod(id: &str) -> ModSummary {
-        ModSummary {
-            package_id: id.to_string(),
-            name: id.to_string(),
-            author: None,
-            is_base_content: false,
-        }
-    }
+    use crate::testutil::test_mod_summary;
 
     fn test_metadata() -> ReportMetadata {
         ReportMetadata {
             timestamp: "2026-06-14T00:00:00Z".into(),
             game_version: Some("1.5".into()),
             order_aware: false,
-            mods_scanned: vec![test_mod("mod.a"), test_mod("mod.b")],
+            mods_scanned: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
         }
     }
 
@@ -118,7 +110,7 @@ mod tests {
                     def_type: "ThingDef".into(),
                     def_name: "A".into(),
                 },
-                mods: vec![test_mod("mod.a"), test_mod("mod.b")],
+                mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
                 mechanism: DefConflictMechanism::DirectReplacement {
                     divergent_fields: vec!["label".into()],
                 },
@@ -130,7 +122,7 @@ mod tests {
                     def_type: "ThingDef".into(),
                     def_name: "B".into(),
                 },
-                mods: vec![test_mod("mod.a"), test_mod("mod.b")],
+                mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
                 mechanism: DefConflictMechanism::XPathOverlap {
                     xpath_a: "a".into(),
                     xpath_b: "b".into(),
@@ -163,7 +155,7 @@ mod tests {
                     def_type: "ThingDef".into(),
                     def_name: "A".into(),
                 },
-                mods: vec![test_mod("mod.a"), test_mod("mod.b")],
+                mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
                 mechanism: DefConflictMechanism::DirectReplacement {
                     divergent_fields: vec!["label".into()],
                 },
@@ -175,7 +167,7 @@ mod tests {
                     def_type: "ThingDef".into(),
                     def_name: "B".into(),
                 },
-                mods: vec![test_mod("mod.a"), test_mod("mod.b")],
+                mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
                 mechanism: DefConflictMechanism::XPathOverlap {
                     xpath_a: "a".into(),
                     xpath_b: "b".into(),

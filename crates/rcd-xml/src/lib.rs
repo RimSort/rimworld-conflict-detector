@@ -147,15 +147,7 @@ fn build_replacement_map(
 mod integration_tests {
     use super::*;
     use rcd_core::folder::discover_mods;
-
-    fn fixtures_path() -> std::path::PathBuf {
-        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("tests/fixtures/mods")
-    }
+    use rcd_core::testutil::fixtures_path;
 
     #[test]
     fn xml_detector_finds_steel_conflict() {

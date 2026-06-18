@@ -275,20 +275,12 @@ fn extract_tag_content(xml: &str, target_tag: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_mod_summary(id: &str, name: &str) -> ModSummary {
-        ModSummary {
-            package_id: id.to_string(),
-            name: name.to_string(),
-            author: None,
-            is_base_content: false,
-        }
-    }
+    use rcd_core::testutil::test_mod_summary_named;
 
     #[test]
     fn detect_direct_replacement() {
         let mod_a = ModDefs {
-            mod_summary: test_mod_summary("test.mod.a", "Mod A"),
+            mod_summary: test_mod_summary_named("test.mod.a", "Mod A"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -299,7 +291,7 @@ mod tests {
         };
 
         let mod_b = ModDefs {
-            mod_summary: test_mod_summary("test.mod.b", "Mod B"),
+            mod_summary: test_mod_summary_named("test.mod.b", "Mod B"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -332,7 +324,7 @@ mod tests {
         let xml = "<ThingDef><defName>Steel</defName><statBases><MaxHitPoints>100</MaxHitPoints></statBases></ThingDef>";
 
         let mod_a = ModDefs {
-            mod_summary: test_mod_summary("test.mod.a", "Mod A"),
+            mod_summary: test_mod_summary_named("test.mod.a", "Mod A"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -343,7 +335,7 @@ mod tests {
         };
 
         let mod_b = ModDefs {
-            mod_summary: test_mod_summary("test.mod.b", "Mod B"),
+            mod_summary: test_mod_summary_named("test.mod.b", "Mod B"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -364,7 +356,7 @@ mod tests {
     #[test]
     fn replacement_with_load_order_reports_winner() {
         let mod_a = ModDefs {
-            mod_summary: test_mod_summary("test.mod.a", "Mod A"),
+            mod_summary: test_mod_summary_named("test.mod.a", "Mod A"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -375,7 +367,7 @@ mod tests {
         };
 
         let mod_b = ModDefs {
-            mod_summary: test_mod_summary("test.mod.b", "Mod B"),
+            mod_summary: test_mod_summary_named("test.mod.b", "Mod B"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -411,7 +403,7 @@ mod tests {
         let xml_b = "<ThingDef><defName>Steel</defName><statBases><MaxHitPoints>100</MaxHitPoints></statBases></ThingDef>";
 
         let mod_a = ModDefs {
-            mod_summary: test_mod_summary("test.mod.a", "Mod A"),
+            mod_summary: test_mod_summary_named("test.mod.a", "Mod A"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -422,7 +414,7 @@ mod tests {
         };
 
         let mod_b = ModDefs {
-            mod_summary: test_mod_summary("test.mod.b", "Mod B"),
+            mod_summary: test_mod_summary_named("test.mod.b", "Mod B"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -443,7 +435,7 @@ mod tests {
     #[test]
     fn divergent_fields_detected() {
         let mod_a = ModDefs {
-            mod_summary: test_mod_summary("test.mod.a", "Mod A"),
+            mod_summary: test_mod_summary_named("test.mod.a", "Mod A"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -454,7 +446,7 @@ mod tests {
         };
 
         let mod_b = ModDefs {
-            mod_summary: test_mod_summary("test.mod.b", "Mod B"),
+            mod_summary: test_mod_summary_named("test.mod.b", "Mod B"),
 
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
@@ -488,7 +480,7 @@ mod tests {
     #[test]
     fn same_mod_version_folders_no_conflict() {
         let mod_defs = ModDefs {
-            mod_summary: test_mod_summary("test.mod.versioned", "Versioned Mod"),
+            mod_summary: test_mod_summary_named("test.mod.versioned", "Versioned Mod"),
 
             defs: vec![
                 ParsedDef {

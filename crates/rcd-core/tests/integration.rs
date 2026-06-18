@@ -1,15 +1,7 @@
 use rcd_core::folder::discover_mods;
 use rcd_core::report::ReportMetadata;
+use rcd_core::testutil::fixtures_path;
 use rcd_core::*;
-
-fn fixtures_path() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("tests/fixtures/mods")
-}
 
 fn run_analysis(mods: &[Mod], order: Option<&LoadOrder>) -> Report {
     let mut engine = Engine::new();

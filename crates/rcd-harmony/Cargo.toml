@@ -13,4 +13,5 @@ walkdir = { workspace = true }
 petgraph = { workspace = true }
 
 [dev-dependencies]
+rcd-core = { workspace = true, features = ["test-helpers"] }
 tempfile = { workspace = true }

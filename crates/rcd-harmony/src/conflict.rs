@@ -230,15 +230,7 @@ fn to_patch_info(mod_summary: &ModSummary, patch: &DiscoveredPatch) -> HarmonyPa
 mod tests {
     use super::*;
     use rcd_core::Severity;
-
-    fn test_mod(id: &str) -> ModSummary {
-        ModSummary {
-            package_id: id.to_string(),
-            name: id.to_string(),
-            author: None,
-            is_base_content: false,
-        }
-    }
+    use rcd_core::testutil::test_mod_summary;
 
     fn make_patch(
         target_type: &str,
@@ -264,7 +256,7 @@ mod tests {
     fn two_prefixes_with_bool_is_error() {
         let all_patches = vec![
             (
-                test_mod("mod.a"),
+                test_mod_summary("mod.a"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -274,7 +266,7 @@ mod tests {
                 )],
             ),
             (
-                test_mod("mod.b"),
+                test_mod_summary("mod.b"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -305,7 +297,7 @@ mod tests {
     fn two_postfixes_is_info() {
         let all_patches = vec![
             (
-                test_mod("mod.a"),
+                test_mod_summary("mod.a"),
                 vec![make_patch(
                     "Pawn",
                     "GetGizmos",
@@ -315,7 +307,7 @@ mod tests {
                 )],
             ),
             (
-                test_mod("mod.b"),
+                test_mod_summary("mod.b"),
                 vec![make_patch(
                     "Pawn",
                     "GetGizmos",
@@ -341,7 +333,7 @@ mod tests {
     fn prefix_plus_transpiler_is_warning() {
         let all_patches = vec![
             (
-                test_mod("mod.a"),
+                test_mod_summary("mod.a"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -351,7 +343,7 @@ mod tests {
                 )],
             ),
             (
-                test_mod("mod.b"),
+                test_mod_summary("mod.b"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -376,7 +368,7 @@ mod tests {
     #[test]
     fn same_mod_not_a_conflict() {
         let all_patches = vec![(
-            test_mod("mod.a"),
+            test_mod_summary("mod.a"),
             vec![
                 make_patch("Pawn", "Kill", HarmonyPatchKind::Prefix, true, 400),
                 make_patch("Pawn", "Kill", HarmonyPatchKind::Postfix, false, 400),
@@ -402,7 +394,7 @@ mod tests {
 
         let all_patches = vec![
             (
-                test_mod("mod.low"),
+                test_mod_summary("mod.low"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -412,7 +404,7 @@ mod tests {
                 )],
             ),
             (
-                test_mod("mod.high"),
+                test_mod_summary("mod.high"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -422,7 +414,7 @@ mod tests {
                 )],
             ),
             (
-                test_mod("mod.mid"),
+                test_mod_summary("mod.mid"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -461,7 +453,7 @@ mod tests {
 
         let all_patches = vec![
             (
-                test_mod("mod.second"),
+                test_mod_summary("mod.second"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -471,7 +463,7 @@ mod tests {
                 )],
             ),
             (
-                test_mod("mod.first"),
+                test_mod_summary("mod.first"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -502,7 +494,7 @@ mod tests {
     fn no_execution_order_without_load_order() {
         let all_patches = vec![
             (
-                test_mod("mod.a"),
+                test_mod_summary("mod.a"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -512,7 +504,7 @@ mod tests {
                 )],
             ),
             (
-                test_mod("mod.b"),
+                test_mod_summary("mod.b"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",
@@ -540,7 +532,7 @@ mod tests {
     fn skips_patches_without_target() {
         let all_patches = vec![
             (
-                test_mod("mod.a"),
+                test_mod_summary("mod.a"),
                 vec![DiscoveredPatch {
                     target_type: None,
                     target_method: Some("Kill".to_string()),
@@ -554,7 +546,7 @@ mod tests {
                 }],
             ),
             (
-                test_mod("mod.b"),
+                test_mod_summary("mod.b"),
                 vec![DiscoveredPatch {
                     target_type: Some("Pawn".to_string()),
                     target_method: None,
@@ -586,7 +578,7 @@ mod tests {
         // so mod.b should come before mod.a in execution order
         let all_patches = vec![
             (
-                test_mod("mod.a"),
+                test_mod_summary("mod.a"),
                 vec![{
                     let mut p = make_patch("Pawn", "Kill", HarmonyPatchKind::Prefix, false, 400);
                     p.after = vec!["mod.b".to_string()];
@@ -594,7 +586,7 @@ mod tests {
                 }],
             ),
             (
-                test_mod("mod.b"),
+                test_mod_summary("mod.b"),
                 vec![make_patch(
                     "Pawn",
                     "Kill",

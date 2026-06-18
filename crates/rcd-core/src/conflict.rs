@@ -138,15 +138,7 @@ impl Conflict {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_mod(id: &str) -> ModSummary {
-        ModSummary {
-            package_id: id.to_string(),
-            name: id.to_string(),
-            author: None,
-            is_base_content: false,
-        }
-    }
+    use crate::testutil::test_mod_summary;
 
     #[test]
     fn def_replacement_is_error() {
@@ -155,7 +147,7 @@ mod tests {
                 def_type: "ThingDef".into(),
                 def_name: "Steel".into(),
             },
-            mods: vec![test_mod("mod.a"), test_mod("mod.b")],
+            mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
             mechanism: DefConflictMechanism::DirectReplacement {
                 divergent_fields: vec!["statBases/MaxHitPoints".into()],
             },
@@ -172,7 +164,7 @@ mod tests {
                 def_type: "ThingDef".into(),
                 def_name: "Steel".into(),
             },
-            mods: vec![test_mod("mod.a"), test_mod("mod.b")],
+            mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
             mechanism: DefConflictMechanism::XPathOverlap {
                 xpath_a: "Defs/ThingDef[defName=\"Steel\"]/statBases".into(),
                 xpath_b: "Defs/ThingDef[defName=\"Steel\"]/statBases".into(),
@@ -191,7 +183,7 @@ mod tests {
                 def_type: "ThingDef".into(),
                 def_name: String::new(),
             },
-            mods: vec![test_mod("mod.a"), test_mod("mod.b")],
+            mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
             mechanism: DefConflictMechanism::XPathOverlap {
                 xpath_a: "Defs/ThingDef/statBases".into(),
                 xpath_b: "Defs/ThingDef[defName=\"Steel\"]/statBases".into(),
@@ -210,7 +202,7 @@ mod tests {
                 def_type: "ThingDef".into(),
                 def_name: "Steel".into(),
             },
-            mods: vec![test_mod("mod.a"), test_mod("mod.b")],
+            mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
             mechanism: DefConflictMechanism::XPathOnReplacedDef {
                 xpath: "Defs/ThingDef[defName=\"Steel\"]/statBases".into(),
                 replaced_by: "mod.a".into(),
@@ -231,7 +223,7 @@ mod tests {
             },
             patches: vec![
                 HarmonyPatchInfo {
-                    mod_summary: test_mod("mod.a"),
+                    mod_summary: test_mod_summary("mod.a"),
                     dll_name: "ModA.dll".into(),
                     patch_kind: HarmonyPatchKind::Prefix,
                     priority: 400,
@@ -240,7 +232,7 @@ mod tests {
                     returns_bool: true,
                 },
                 HarmonyPatchInfo {
-                    mod_summary: test_mod("mod.b"),
+                    mod_summary: test_mod_summary("mod.b"),
                     dll_name: "ModB.dll".into(),
                     patch_kind: HarmonyPatchKind::Prefix,
                     priority: 400,
@@ -265,7 +257,7 @@ mod tests {
             },
             patches: vec![
                 HarmonyPatchInfo {
-                    mod_summary: test_mod("mod.a"),
+                    mod_summary: test_mod_summary("mod.a"),
                     dll_name: "ModA.dll".into(),
                     patch_kind: HarmonyPatchKind::Postfix,
                     priority: 400,
@@ -274,7 +266,7 @@ mod tests {
                     returns_bool: false,
                 },
                 HarmonyPatchInfo {
-                    mod_summary: test_mod("mod.b"),
+                    mod_summary: test_mod_summary("mod.b"),
                     dll_name: "ModB.dll".into(),
                     patch_kind: HarmonyPatchKind::Postfix,
                     priority: 400,
@@ -299,7 +291,7 @@ mod tests {
             },
             patches: vec![
                 HarmonyPatchInfo {
-                    mod_summary: test_mod("mod.a"),
+                    mod_summary: test_mod_summary("mod.a"),
                     dll_name: "ModA.dll".into(),
                     patch_kind: HarmonyPatchKind::Prefix,
                     priority: 400,
@@ -308,7 +300,7 @@ mod tests {
                     returns_bool: false,
                 },
                 HarmonyPatchInfo {
-                    mod_summary: test_mod("mod.b"),
+                    mod_summary: test_mod_summary("mod.b"),
                     dll_name: "ModB.dll".into(),
                     patch_kind: HarmonyPatchKind::Transpiler,
                     priority: 400,
@@ -333,7 +325,7 @@ mod tests {
             },
             patches: vec![
                 HarmonyPatchInfo {
-                    mod_summary: test_mod("mod.a"),
+                    mod_summary: test_mod_summary("mod.a"),
                     dll_name: "ModA.dll".into(),
                     patch_kind: HarmonyPatchKind::Transpiler,
                     priority: 400,
@@ -342,7 +334,7 @@ mod tests {
                     returns_bool: false,
                 },
                 HarmonyPatchInfo {
-                    mod_summary: test_mod("mod.b"),
+                    mod_summary: test_mod_summary("mod.b"),
                     dll_name: "ModB.dll".into(),
                     patch_kind: HarmonyPatchKind::Transpiler,
                     priority: 400,
@@ -364,7 +356,7 @@ mod tests {
                 def_type: "ThingDef".into(),
                 def_name: "Steel".into(),
             },
-            mods: vec![test_mod("mod.a")],
+            mods: vec![test_mod_summary("mod.a")],
             mechanism: DefConflictMechanism::DirectReplacement {
                 divergent_fields: vec!["label".into()],
             },

@@ -139,20 +139,12 @@ pub fn detect_xpath_conflicts(
 mod tests {
     use super::*;
     use crate::patch_ops::{PatchCondition, PatchOpType};
-
-    fn test_mod(id: &str, name: &str) -> ModSummary {
-        ModSummary {
-            package_id: id.to_string(),
-            name: name.to_string(),
-            author: None,
-            is_base_content: false,
-        }
-    }
+    use rcd_core::testutil::test_mod_summary_named;
 
     #[test]
     fn xpath_overlap_produces_warning() {
-        let mod_c = test_mod("test.mod.c", "Mod C");
-        let mod_d = test_mod("test.mod.d", "Mod D");
+        let mod_c = test_mod_summary_named("test.mod.c", "Mod C");
+        let mod_d = test_mod_summary_named("test.mod.d", "Mod D");
 
         let patches = vec![
             (
@@ -197,8 +189,8 @@ mod tests {
 
     #[test]
     fn xpath_on_replaced_def_produces_error() {
-        let mod_a = test_mod("test.mod.a", "Mod A");
-        let mod_c = test_mod("test.mod.c", "Mod C");
+        let mod_a = test_mod_summary_named("test.mod.a", "Mod A");
+        let mod_c = test_mod_summary_named("test.mod.c", "Mod C");
 
         let patches = vec![(
             mod_c.clone(),
@@ -256,7 +248,7 @@ mod tests {
 
     #[test]
     fn no_conflict_within_same_mod() {
-        let mod_c = test_mod("test.mod.c", "Mod C");
+        let mod_c = test_mod_summary_named("test.mod.c", "Mod C");
 
         let patches = vec![(
             mod_c,
@@ -288,8 +280,8 @@ mod tests {
 
     #[test]
     fn non_overlapping_xpaths_no_conflict() {
-        let mod_c = test_mod("test.mod.c", "Mod C");
-        let mod_d = test_mod("test.mod.d", "Mod D");
+        let mod_c = test_mod_summary_named("test.mod.c", "Mod C");
+        let mod_d = test_mod_summary_named("test.mod.d", "Mod D");
 
         let patches = vec![
             (
@@ -324,8 +316,8 @@ mod tests {
 
     #[test]
     fn xpath_overlap_with_load_order() {
-        let mod_c = test_mod("test.mod.c", "Mod C");
-        let mod_d = test_mod("test.mod.d", "Mod D");
+        let mod_c = test_mod_summary_named("test.mod.c", "Mod C");
+        let mod_d = test_mod_summary_named("test.mod.d", "Mod D");
 
         let patches = vec![
             (
@@ -367,8 +359,8 @@ mod tests {
 
     #[test]
     fn wildcard_xpath_overlap_is_info() {
-        let mod_c = test_mod("test.mod.c", "Mod C");
-        let mod_d = test_mod("test.mod.d", "Mod D");
+        let mod_c = test_mod_summary_named("test.mod.c", "Mod C");
+        let mod_d = test_mod_summary_named("test.mod.d", "Mod D");
 
         let patches = vec![
             (
@@ -409,8 +401,8 @@ mod tests {
 
     #[test]
     fn wildcard_vs_wildcard_xpath_overlap_is_info() {
-        let mod_c = test_mod("test.mod.c", "Mod C");
-        let mod_d = test_mod("test.mod.d", "Mod D");
+        let mod_c = test_mod_summary_named("test.mod.c", "Mod C");
+        let mod_d = test_mod_summary_named("test.mod.d", "Mod D");
 
         let patches = vec![
             (

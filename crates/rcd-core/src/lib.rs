@@ -9,6 +9,9 @@ pub mod report;
 pub mod severity;
 pub mod types;
 
+#[cfg(any(test, feature = "test-helpers"))]
+pub mod testutil;
+
 pub use conflict::{
     Conflict, DefConflict, DefConflictMechanism, DefTarget, HarmonyConflict, HarmonyPatchInfo,
     HarmonyPatchKind, HarmonyTarget,

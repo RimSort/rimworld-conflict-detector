@@ -212,15 +212,7 @@ fn parse_about_xml_str(xml: &str, mod_root: &Path) -> Result<Mod, AboutXmlError>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn fixtures_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("tests/fixtures/mods")
-    }
+    use crate::testutil::fixtures_path;
 
     #[test]
     fn parse_about_xml_basic() {
