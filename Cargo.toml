@@ -26,6 +26,7 @@ walkdir = "2"
 chrono = "0.4"
 tempfile = "3"
 petgraph = "0.8"
+owo-colors = "4"
 
 rcd-core = { path = "crates/rcd-core" }
 rcd-xml = { path = "crates/rcd-xml" }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use owo_colors::OwoColorize;
 use rcd_core::conflict::*;
 use rcd_core::{Conflict, Report, Severity};
 
@@ -9,7 +10,11 @@ pub fn format_json(report: &Report) -> String {
     serde_json::to_string_pretty(report).unwrap()
 }
 
-pub fn format_mods_list(mods: &[rcd_core::Mod], format: &crate::args::OutputFormat) -> String {
+pub fn format_mods_list(
+    mods: &[rcd_core::Mod],
+    format: &crate::args::OutputFormat,
+    use_color: bool,
+) -> String {
     match format {
         crate::args::OutputFormat::Json => {
             let summaries: Vec<rcd_core::ModSummary> =
@@ -28,7 +33,15 @@ pub fn format_mods_list(mods: &[rcd_core::Mod], format: &crate::args::OutputForm
                         i + 1,
                         m.name,
                         m.package_id,
-                        if m.is_base_content { " [base]" } else { "" },
+                        if m.is_base_content {
+                            if use_color {
+                                format!(" {}", "[base]".dimmed())
+                            } else {
+                                " [base]".to_string()
+                            }
+                        } else {
+                            String::new()
+                        },
                         if m.supported_versions.is_empty() {
                             "any".into()
                         } else {
@@ -47,14 +60,28 @@ pub fn format_mods_list(mods: &[rcd_core::Mod], format: &crate::args::OutputForm
     }
 }
 
-pub fn format_human(report: &Report, min_severity: Severity, group_by: &GroupBy) -> String {
+pub fn format_human(
+    report: &Report,
+    min_severity: Severity,
+    group_by: &GroupBy,
+    use_color: bool,
+) -> String {
     let mut output = String::new();
 
     // Diagnostics first
     for d in &report.diagnostics {
+        let sev_display = if use_color {
+            match d.severity {
+                Severity::Error => format!("{}", d.severity).red().bold().to_string(),
+                Severity::Warning => format!("{}", d.severity).yellow().bold().to_string(),
+                Severity::Info => format!("{}", d.severity).dimmed().to_string(),
+            }
+        } else {
+            format!("{}", d.severity)
+        };
         output.push_str(&format!(
             "[{}] {}: {}\n",
-            d.severity,
+            sev_display,
             d.affected_mod.as_deref().unwrap_or("unknown"),
             d.message
         ));
@@ -89,9 +116,13 @@ pub fn format_human(report: &Report, min_severity: Severity, group_by: &GroupBy)
                         Severity::Warning => "Warnings",
                         Severity::Info => "Info",
                     };
-                    output.push_str(&format!("── {} ({}) ──\n\n", label, group.len()));
+                    if use_color {
+                        output.push_str(&format!("── {} ({}) ──\n\n", label.bold(), group.len()));
+                    } else {
+                        output.push_str(&format!("── {} ({}) ──\n\n", label, group.len()));
+                    }
                     for conflict in group {
-                        output.push_str(&format_conflict(conflict));
+                        output.push_str(&format_conflict(conflict, use_color));
                         output.push('\n');
                     }
                 }
@@ -107,14 +138,23 @@ pub fn format_human(report: &Report, min_severity: Severity, group_by: &GroupBy)
                 mod_names.sort();
                 for mod_name in mod_names {
                     let conflicts = &by_mod[&mod_name];
-                    output.push_str(&format!(
-                        "── {} ({} conflict{}) ──\n\n",
-                        mod_name,
-                        conflicts.len(),
-                        if conflicts.len() == 1 { "" } else { "s" }
-                    ));
+                    if use_color {
+                        output.push_str(&format!(
+                            "── {} ({} conflict{}) ──\n\n",
+                            mod_name.bold(),
+                            conflicts.len(),
+                            if conflicts.len() == 1 { "" } else { "s" }
+                        ));
+                    } else {
+                        output.push_str(&format!(
+                            "── {} ({} conflict{}) ──\n\n",
+                            mod_name,
+                            conflicts.len(),
+                            if conflicts.len() == 1 { "" } else { "s" }
+                        ));
+                    }
                     for conflict in conflicts {
-                        output.push_str(&format_conflict(conflict));
+                        output.push_str(&format_conflict(conflict, use_color));
                         output.push('\n');
                     }
                 }
@@ -123,22 +163,56 @@ pub fn format_human(report: &Report, min_severity: Severity, group_by: &GroupBy)
     }
 
     // Summary
-    output.push_str(&format!(
-        "Summary: {} error(s), {} warning(s), {} info\n",
-        report.summary.conflicts_by_severity.error,
-        report.summary.conflicts_by_severity.warning,
-        report.summary.conflicts_by_severity.info
-    ));
+    if use_color {
+        output.push_str(&format!(
+            "Summary: {} error(s), {} warning(s), {} info\n",
+            report
+                .summary
+                .conflicts_by_severity
+                .error
+                .to_string()
+                .red()
+                .bold(),
+            report
+                .summary
+                .conflicts_by_severity
+                .warning
+                .to_string()
+                .yellow()
+                .bold(),
+            report
+                .summary
+                .conflicts_by_severity
+                .info
+                .to_string()
+                .dimmed()
+        ));
+    } else {
+        output.push_str(&format!(
+            "Summary: {} error(s), {} warning(s), {} info\n",
+            report.summary.conflicts_by_severity.error,
+            report.summary.conflicts_by_severity.warning,
+            report.summary.conflicts_by_severity.info
+        ));
+    }
 
     output
 }
 
-fn format_conflict(conflict: &Conflict) -> String {
+fn format_conflict(conflict: &Conflict, use_color: bool) -> String {
     let severity = conflict.severity();
-    let severity_tag = match severity {
-        Severity::Error => "ERROR",
-        Severity::Warning => "WARN",
-        Severity::Info => "INFO",
+    let severity_tag = if use_color {
+        match severity {
+            Severity::Error => "ERROR".red().bold().to_string(),
+            Severity::Warning => "WARN".yellow().bold().to_string(),
+            Severity::Info => "INFO".dimmed().to_string(),
+        }
+    } else {
+        match severity {
+            Severity::Error => "ERROR".to_string(),
+            Severity::Warning => "WARN".to_string(),
+            Severity::Info => "INFO".to_string(),
+        }
     };
 
     let mut out = String::new();
@@ -199,4 +273,56 @@ fn format_conflict(conflict: &Conflict) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcd_core::Report;
+    use rcd_core::report::ReportMetadata;
+
+    fn empty_report() -> Report {
+        Report {
+            schema_version: 1,
+            metadata: ReportMetadata {
+                timestamp: String::new(),
+                game_version: None,
+                order_aware: false,
+                mods_scanned: vec![],
+            },
+            conflicts: vec![],
+            diagnostics: vec![],
+            summary: rcd_core::report::ReportSummary {
+                total_mods: 0,
+                mods_with_conflicts: 0,
+                conflicts_by_severity: rcd_core::report::SeverityCounts {
+                    error: 0,
+                    warning: 0,
+                    info: 0,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn format_human_no_color_has_no_ansi_escapes() {
+        let report = empty_report();
+        let output = format_human(&report, Severity::Info, &GroupBy::Severity, false);
+        assert!(
+            !output.contains('\x1b'),
+            "plain output should not contain ANSI escapes"
+        );
+    }
+
+    #[test]
+    fn format_human_with_color_summary_has_ansi_escapes() {
+        // When there are conflicts, the summary line should have colored counts
+        let report = empty_report();
+        let output = format_human(&report, Severity::Info, &GroupBy::Severity, true);
+        // Even with 0 conflicts, the summary still prints — it should contain escapes for the counts
+        assert!(
+            output.contains('\x1b'),
+            "colored output should contain ANSI escapes"
+        );
+    }
 }

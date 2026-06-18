@@ -2,6 +2,8 @@ mod args;
 mod output;
 mod resolve;
 
+use std::io::IsTerminal;
+
 use args::{Cli, Commands, MinSeverity, OutputFormat};
 use clap::Parser;
 use rcd_core::report::ReportMetadata;
@@ -12,6 +14,12 @@ fn main() {
     let format = cli.format;
     let severity = cli.severity;
     let group_by = cli.group_by;
+
+    let use_color = match cli.color {
+        args::ColorMode::Auto => std::io::stdout().is_terminal(),
+        args::ColorMode::Always => true,
+        args::ColorMode::Never => false,
+    };
 
     let exit_code = match cli.command {
         Commands::Scan {
@@ -27,12 +35,13 @@ fn main() {
             ordered,
             game_version,
             rimworld_path,
+            use_color,
         ),
         Commands::ListMods {
             input,
             game_version,
             rimworld_path,
-        } => run_list_mods(&format, input, game_version, rimworld_path),
+        } => run_list_mods(&format, input, game_version, rimworld_path, use_color),
     };
 
     std::process::exit(exit_code);
@@ -61,6 +70,7 @@ fn resolve_mods(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_scan(
     format: &OutputFormat,
     severity_filter: &MinSeverity,
@@ -69,6 +79,7 @@ fn run_scan(
     ordered: bool,
     game_version: Option<String>,
     rimworld_path: Option<std::path::PathBuf>,
+    use_color: bool,
 ) -> i32 {
     // Resolve mods based on input mode
     let resolved = resolve_mods(
@@ -119,7 +130,10 @@ fn run_scan(
             println!("{}", output::format_json(&report));
         }
         OutputFormat::Human => {
-            print!("{}", output::format_human(&report, min_severity, group_by));
+            print!(
+                "{}",
+                output::format_human(&report, min_severity, group_by, use_color)
+            );
         }
     }
 
@@ -131,6 +145,7 @@ fn run_list_mods(
     input: args::ScanInput,
     game_version: Option<String>,
     rimworld_path: Option<std::path::PathBuf>,
+    use_color: bool,
 ) -> i32 {
     // Resolve mods - list-mods doesn't use ordered parameter
     let resolved = resolve_mods(
@@ -145,6 +160,9 @@ fn run_list_mods(
         return 2;
     }
 
-    println!("{}", output::format_mods_list(&resolved.mods, format));
+    println!(
+        "{}",
+        output::format_mods_list(&resolved.mods, format, use_color)
+    );
     0
 }
