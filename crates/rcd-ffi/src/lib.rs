@@ -81,7 +81,7 @@ pub unsafe extern "C" fn rcd_analyze(
         engine.add_detector(Box::new(rcd_harmony::HarmonyDetector));
 
         let metadata = rcd_core::report::ReportMetadata {
-            timestamp: String::new(), // caller can set this
+            timestamp: chrono::Utc::now().to_rfc3339(),
             game_version: game_version.map(String::from),
             order_aware: load_order.is_some(),
             mods_scanned: mods.iter().map(rcd_core::ModSummary::from).collect(),
@@ -159,5 +159,19 @@ mod tests {
         // Should parse as valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&result_str).unwrap();
         assert_eq!(parsed["schema_version"], 1);
+    }
+
+    #[test]
+    fn report_has_valid_timestamp() {
+        let config = CString::new(r#"{"mod_paths": []}"#).unwrap();
+        let result = unsafe { rcd_analyze(config.as_ptr(), None) };
+        assert!(!result.is_null());
+        let result_str = unsafe { CStr::from_ptr(result).to_str().unwrap().to_owned() };
+        unsafe { rcd_free(result) };
+
+        let parsed: serde_json::Value = serde_json::from_str(&result_str).unwrap();
+        let ts = parsed["metadata"]["timestamp"].as_str().unwrap();
+        assert!(!ts.is_empty(), "timestamp should not be empty");
+        chrono::DateTime::parse_from_rfc3339(ts).expect("timestamp should be valid RFC 3339");
     }
 }
