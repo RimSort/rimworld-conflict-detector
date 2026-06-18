@@ -13,7 +13,8 @@ pub struct ResolvedMods {
 
 /// Resolve mods from a directory scan (order-agnostic).
 pub fn resolve_from_dir(dir: &Path, game_version: Option<&str>) -> ResolvedMods {
-    let mods = discover_mods(&[dir.to_path_buf()], game_version);
+    let mut mods = discover_mods(&[dir.to_path_buf()], game_version);
+    mark_base_content(&mut mods);
     ResolvedMods {
         mods,
         load_order: None,
@@ -44,6 +45,8 @@ pub fn resolve_from_mod_paths(
             }),
         }
     }
+
+    mark_base_content(&mut mods);
 
     let load_order = if ordered {
         Some(LoadOrder {
@@ -106,10 +109,7 @@ pub fn resolve_from_config(
     let mut diagnostics = Vec::new();
     for package_id in &config.active_mods {
         match mod_map.remove(package_id) {
-            Some(mut m) => {
-                if m.package_id.starts_with("ludeon.") {
-                    m.is_base_content = true;
-                }
+            Some(m) => {
                 mods.push(m);
             }
             None => diagnostics.push(Diagnostic {
@@ -121,10 +121,21 @@ pub fn resolve_from_config(
         }
     }
 
+    mark_base_content(&mut mods);
+
     ResolvedMods {
         mods,
         load_order: Some(config.load_order()),
         diagnostics,
+    }
+}
+
+/// Mark mods from Ludeon Studios (Core, DLCs) as base content.
+fn mark_base_content(mods: &mut [Mod]) {
+    for m in mods {
+        if m.package_id.starts_with("ludeon.") {
+            m.is_base_content = true;
+        }
     }
 }
 
@@ -146,4 +157,81 @@ fn find_steam_workshop(rimworld_path: &Path) -> Option<PathBuf> {
         current = parent.to_path_buf();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mark_base_content_identifies_ludeon_mods() {
+        let mut mods = vec![
+            Mod {
+                package_id: "ludeon.rimworld".to_string(),
+                name: "Core".to_string(),
+                author: None,
+                is_base_content: false,
+                root_path: PathBuf::new(),
+                supported_versions: vec![],
+                dependencies: vec![],
+                incompatibilities: vec![],
+                load_before: vec![],
+                load_after: vec![],
+                force_load_before: vec![],
+                force_load_after: vec![],
+                defs_paths: vec![],
+                patches_paths: vec![],
+                assemblies_paths: vec![],
+            },
+            Mod {
+                package_id: "someauthor.coolmod".to_string(),
+                name: "Cool Mod".to_string(),
+                author: None,
+                is_base_content: false,
+                root_path: PathBuf::new(),
+                supported_versions: vec![],
+                dependencies: vec![],
+                incompatibilities: vec![],
+                load_before: vec![],
+                load_after: vec![],
+                force_load_before: vec![],
+                force_load_after: vec![],
+                defs_paths: vec![],
+                patches_paths: vec![],
+                assemblies_paths: vec![],
+            },
+            Mod {
+                package_id: "ludeon.rimworld.royalty".to_string(),
+                name: "Royalty".to_string(),
+                author: None,
+                is_base_content: false,
+                root_path: PathBuf::new(),
+                supported_versions: vec![],
+                dependencies: vec![],
+                incompatibilities: vec![],
+                load_before: vec![],
+                load_after: vec![],
+                force_load_before: vec![],
+                force_load_after: vec![],
+                defs_paths: vec![],
+                patches_paths: vec![],
+                assemblies_paths: vec![],
+            },
+        ];
+
+        mark_base_content(&mut mods);
+
+        assert!(
+            mods[0].is_base_content,
+            "ludeon.rimworld should be base content"
+        );
+        assert!(
+            !mods[1].is_base_content,
+            "someauthor.coolmod should not be base content"
+        );
+        assert!(
+            mods[2].is_base_content,
+            "ludeon.rimworld.royalty should be base content"
+        );
+    }
 }
