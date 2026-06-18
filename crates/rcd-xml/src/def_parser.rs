@@ -14,21 +14,32 @@ pub struct ParsedDef {
 
 /// Recursively walks a directory, parses all `.xml` files, and returns all defs found.
 ///
-/// Returns a tuple of (parsed defs, count of abstract defs without defName that were skipped).
-pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize) {
+/// Returns a tuple of (parsed defs, count of abstract defs without defName that were skipped, I/O errors).
+pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, Vec<String>) {
     let mut defs = Vec::new();
     let mut total_skipped: usize = 0;
+    let mut errors = Vec::new();
 
-    for entry in WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.path()
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"))
-        })
-    {
+    for result in WalkDir::new(dir).into_iter() {
+        let entry = match result {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push(format!("Failed to read directory entry: {}", e));
+                continue;
+            }
+        };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if !entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"))
+        {
+            continue;
+        }
+
         let path = entry.path();
         match std::fs::read_to_string(path) {
             Ok(contents) => {
@@ -37,11 +48,13 @@ pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize) {
                 defs.extend(parsed);
                 total_skipped += skipped;
             }
-            Err(_) => continue,
+            Err(e) => {
+                errors.push(format!("Failed to read {}: {}", path.display(), e));
+            }
         }
     }
 
-    (defs, total_skipped)
+    (defs, total_skipped, errors)
 }
 
 /// Parses XML content for defs. Finds top-level elements under `<Defs>` whose tag names
@@ -299,7 +312,7 @@ mod tests {
             .join("tests/fixtures/mods/mod_core/Defs");
 
         if fixtures.exists() {
-            let (defs, _) = parse_defs_dir(&fixtures);
+            let (defs, _, _errors) = parse_defs_dir(&fixtures);
             assert!(defs.len() >= 2, "Expected at least Steel and Wood defs");
 
             let steel = defs.iter().find(|d| d.def_name == "Steel");
@@ -350,5 +363,22 @@ mod tests {
         let (defs, skipped) = parse_defs_from_xml(xml, "test.xml");
         assert_eq!(defs.len(), 2, "Steel + HasName");
         assert_eq!(skipped, 2, "Two abstract defs without defName were skipped");
+    }
+
+    #[test]
+    fn parse_defs_dir_returns_errors_vec() {
+        let dir = tempfile::tempdir().unwrap();
+        let defs_dir = dir.path().join("Defs");
+        std::fs::create_dir_all(&defs_dir).unwrap();
+        std::fs::write(
+            defs_dir.join("Test.xml"),
+            r#"<Defs><ThingDef><defName>Foo</defName></ThingDef></Defs>"#,
+        )
+        .unwrap();
+
+        let (defs, skipped, errors) = parse_defs_dir(defs_dir.as_path());
+        assert_eq!(defs.len(), 1);
+        assert_eq!(skipped, 0);
+        assert!(errors.is_empty());
     }
 }

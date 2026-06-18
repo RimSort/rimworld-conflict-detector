@@ -34,19 +34,27 @@ impl Detector for XmlDetector {
             .par_iter()
             .map(|mod_data| {
                 let mod_summary = ModSummary::from(mod_data);
+                let mut diagnostics = Vec::new();
 
                 // Parse defs
                 let mut defs = Vec::new();
                 let mut abstract_skipped: usize = 0;
                 for defs_path in &mod_data.defs_paths {
-                    let (parsed, skipped) = def_parser::parse_defs_dir(defs_path);
+                    let (parsed, skipped, io_errors) = def_parser::parse_defs_dir(defs_path);
                     defs.extend(parsed);
                     abstract_skipped += skipped;
+                    for err_msg in io_errors {
+                        diagnostics.push(Diagnostic {
+                            affected_mod: Some(mod_summary.package_id.clone()),
+                            severity: Severity::Warning,
+                            message: err_msg,
+                            source: DiagnosticSource::XmlParsing,
+                        });
+                    }
                 }
 
                 // Parse patches
                 let mut patches = Vec::new();
-                let mut diagnostics = Vec::new();
 
                 if abstract_skipped > 0 {
                     diagnostics.push(Diagnostic {
@@ -60,20 +68,15 @@ impl Detector for XmlDetector {
                     });
                 }
                 for patches_path in &mod_data.patches_paths {
-                    match patch_ops::parse_patches_dir(patches_path) {
-                        Ok(parsed_patches) => patches.extend(parsed_patches),
-                        Err(e) => {
-                            diagnostics.push(Diagnostic {
-                                affected_mod: Some(mod_summary.package_id.clone()),
-                                severity: Severity::Warning,
-                                message: format!(
-                                    "Failed to parse patches in {}: {}",
-                                    patches_path.display(),
-                                    e
-                                ),
-                                source: DiagnosticSource::XmlParsing,
-                            });
-                        }
+                    let (parsed_patches, io_errors) = patch_ops::parse_patches_dir(patches_path);
+                    patches.extend(parsed_patches);
+                    for err_msg in io_errors {
+                        diagnostics.push(Diagnostic {
+                            affected_mod: Some(mod_summary.package_id.clone()),
+                            severity: Severity::Warning,
+                            message: err_msg,
+                            source: DiagnosticSource::XmlParsing,
+                        });
                     }
                 }
 

@@ -33,30 +33,43 @@ pub struct ParsedPatchOp {
 }
 
 /// Recursively walk a directory and parse all `.xml` files for patch operations.
-pub fn parse_patches_dir(dir: &Path) -> Result<Vec<ParsedPatchOp>, Box<dyn std::error::Error>> {
+pub fn parse_patches_dir(dir: &Path) -> (Vec<ParsedPatchOp>, Vec<String>) {
     let mut ops = Vec::new();
+    let mut errors = Vec::new();
 
-    for entry in WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.file_type().is_file()
-                && e.path()
-                    .extension()
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"))
-        })
-    {
+    for result in WalkDir::new(dir).into_iter() {
+        let entry = match result {
+            Ok(e) => e,
+            Err(e) => {
+                errors.push(format!("Failed to read directory entry: {}", e));
+                continue;
+            }
+        };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if !entry
+            .path()
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"))
+        {
+            continue;
+        }
+
         let path = entry.path();
         match std::fs::read_to_string(path) {
             Ok(contents) => {
                 let source = path.to_string_lossy().to_string();
                 ops.extend(parse_patches_from_xml(&contents, &source));
             }
-            Err(_) => continue,
+            Err(e) => {
+                errors.push(format!("Failed to read {}: {}", path.display(), e));
+            }
         }
     }
 
-    Ok(ops)
+    (ops, errors)
 }
 
 /// Parse a single patches XML file and extract all patch operations.
@@ -411,7 +424,7 @@ mod tests {
             .unwrap()
             .join("tests/fixtures/mods/mod_c/Patches");
 
-        let ops = parse_patches_dir(&fixtures).expect("should parse patches dir");
+        let (ops, _errors) = parse_patches_dir(&fixtures);
         assert_eq!(ops.len(), 2, "mod_c should have 2 patch operations");
 
         assert_eq!(ops[0].op_type, PatchOpType::Replace);
@@ -435,7 +448,7 @@ mod tests {
             .unwrap()
             .join("tests/fixtures/mods/mod_d/Patches");
 
-        let ops = parse_patches_dir(&fixtures).expect("should parse patches dir");
+        let (ops, _errors) = parse_patches_dir(&fixtures);
         assert_eq!(ops.len(), 1, "mod_d should have 1 patch operation");
 
         assert_eq!(ops[0].op_type, PatchOpType::Replace);
@@ -669,7 +682,7 @@ mod tests {
             .unwrap()
             .join("tests/fixtures/mods/mod_e/Patches");
 
-        let ops = parse_patches_dir(&fixtures).expect("should parse patches dir");
+        let (ops, _errors) = parse_patches_dir(&fixtures);
         assert_eq!(
             ops.len(),
             2,
@@ -677,5 +690,26 @@ mod tests {
         );
         assert_eq!(ops[0].op_type, PatchOpType::Add);
         assert_eq!(ops[1].op_type, PatchOpType::Add);
+    }
+
+    #[test]
+    fn parse_patches_dir_returns_errors_vec() {
+        let dir = tempfile::tempdir().unwrap();
+        let patches_dir = dir.path().join("Patches");
+        std::fs::create_dir_all(&patches_dir).unwrap();
+        std::fs::write(
+            patches_dir.join("Patch.xml"),
+            r#"<Patch>
+                <Operation Class="PatchOperationReplace">
+                    <xpath>Defs/ThingDef[defName="Steel"]/statBases</xpath>
+                    <value><statBases><MaxHitPoints>500</MaxHitPoints></statBases></value>
+                </Operation>
+            </Patch>"#,
+        )
+        .unwrap();
+
+        let (ops, errors) = parse_patches_dir(patches_dir.as_path());
+        assert_eq!(ops.len(), 1);
+        assert!(errors.is_empty());
     }
 }
