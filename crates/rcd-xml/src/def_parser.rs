@@ -13,8 +13,11 @@ pub struct ParsedDef {
 }
 
 /// Recursively walks a directory, parses all `.xml` files, and returns all defs found.
-pub fn parse_defs_dir(dir: &Path) -> Vec<ParsedDef> {
+///
+/// Returns a tuple of (parsed defs, count of abstract defs without defName that were skipped).
+pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize) {
     let mut defs = Vec::new();
+    let mut total_skipped: usize = 0;
 
     for entry in WalkDir::new(dir)
         .into_iter()
@@ -30,13 +33,15 @@ pub fn parse_defs_dir(dir: &Path) -> Vec<ParsedDef> {
         match std::fs::read_to_string(path) {
             Ok(contents) => {
                 let source = path.to_string_lossy().to_string();
-                defs.extend(parse_defs_from_xml(&contents, &source));
+                let (parsed, skipped) = parse_defs_from_xml(&contents, &source);
+                defs.extend(parsed);
+                total_skipped += skipped;
             }
             Err(_) => continue,
         }
     }
 
-    defs
+    (defs, total_skipped)
 }
 
 /// Parses XML content for defs. Finds top-level elements under `<Defs>` whose tag names
@@ -44,8 +49,11 @@ pub fn parse_defs_dir(dir: &Path) -> Vec<ParsedDef> {
 /// captures the raw XML of the entire def element.
 ///
 /// Abstract defs (those with `Abstract="True"`) that lack a `defName` are skipped.
-pub fn parse_defs_from_xml(xml: &str, source: &str) -> Vec<ParsedDef> {
+///
+/// Returns a tuple of (parsed defs, count of abstract defs without defName that were skipped).
+pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize) {
     let mut defs = Vec::new();
+    let mut abstract_skipped: usize = 0;
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
@@ -71,10 +79,10 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> Vec<ParsedDef> {
                     });
 
                     // Collect the entire def element's inner content
-                    if let Some(parsed) =
-                        parse_single_def(&mut reader, &tag_name, is_abstract, source)
-                    {
-                        defs.push(parsed);
+                    match parse_single_def(&mut reader, &tag_name, is_abstract, source) {
+                        Some(parsed) => defs.push(parsed),
+                        None if is_abstract => abstract_skipped += 1,
+                        None => {}
                     }
                 }
             }
@@ -91,7 +99,7 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> Vec<ParsedDef> {
         buf.clear();
     }
 
-    defs
+    (defs, abstract_skipped)
 }
 
 /// Parses a single def element that we've already seen the opening tag for.
@@ -215,7 +223,7 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let defs = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _) = parse_defs_from_xml(xml, "test.xml");
         assert_eq!(defs.len(), 2);
 
         assert_eq!(defs[0].def_type, "ThingDef");
@@ -249,7 +257,7 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let defs = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _) = parse_defs_from_xml(xml, "test.xml");
         // Abstract without defName is skipped; abstract WITH defName is kept;
         // non-abstract with defName is kept.
         assert_eq!(defs.len(), 2);
@@ -271,7 +279,7 @@ mod tests {
     </RecipeDef>
 </Defs>"#;
 
-        let defs = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _) = parse_defs_from_xml(xml, "test.xml");
         assert_eq!(defs.len(), 2);
 
         assert_eq!(defs[0].def_type, "ThingDef");
@@ -291,7 +299,7 @@ mod tests {
             .join("tests/fixtures/mods/mod_core/Defs");
 
         if fixtures.exists() {
-            let defs = parse_defs_dir(&fixtures);
+            let (defs, _) = parse_defs_dir(&fixtures);
             assert!(defs.len() >= 2, "Expected at least Steel and Wood defs");
 
             let steel = defs.iter().find(|d| d.def_name == "Steel");
@@ -314,9 +322,33 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let defs = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _) = parse_defs_from_xml(xml, "test.xml");
         // "SomeRandomElement" doesn't end with "Def", so it should be skipped
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].def_name, "Steel");
+    }
+
+    #[test]
+    fn parse_defs_returns_abstract_skip_count() {
+        let xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+    <ThingDef Abstract="True">
+        <label>base thing</label>
+    </ThingDef>
+    <ThingDef Abstract="True">
+        <label>another base</label>
+    </ThingDef>
+    <ThingDef>
+        <defName>Steel</defName>
+    </ThingDef>
+    <ThingDef Abstract="True">
+        <defName>HasName</defName>
+        <label>named abstract</label>
+    </ThingDef>
+</Defs>"#;
+
+        let (defs, skipped) = parse_defs_from_xml(xml, "test.xml");
+        assert_eq!(defs.len(), 2, "Steel + HasName");
+        assert_eq!(skipped, 2, "Two abstract defs without defName were skipped");
     }
 }

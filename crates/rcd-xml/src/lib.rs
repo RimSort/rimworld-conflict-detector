@@ -37,13 +37,28 @@ impl Detector for XmlDetector {
 
                 // Parse defs
                 let mut defs = Vec::new();
+                let mut abstract_skipped: usize = 0;
                 for defs_path in &mod_data.defs_paths {
-                    defs.extend(def_parser::parse_defs_dir(defs_path));
+                    let (parsed, skipped) = def_parser::parse_defs_dir(defs_path);
+                    defs.extend(parsed);
+                    abstract_skipped += skipped;
                 }
 
                 // Parse patches
                 let mut patches = Vec::new();
                 let mut diagnostics = Vec::new();
+
+                if abstract_skipped > 0 {
+                    diagnostics.push(Diagnostic {
+                        affected_mod: Some(mod_summary.package_id.clone()),
+                        severity: Severity::Info,
+                        message: format!(
+                            "Skipped {} abstract def(s) without defName",
+                            abstract_skipped
+                        ),
+                        source: DiagnosticSource::XmlParsing,
+                    });
+                }
                 for patches_path in &mod_data.patches_paths {
                     match patch_ops::parse_patches_dir(patches_path) {
                         Ok(parsed_patches) => patches.extend(parsed_patches),
@@ -215,6 +230,58 @@ mod integration_tests {
             0,
             "Versioned mod should not conflict with itself: {:?}",
             self_conflicts
+        );
+    }
+
+    #[test]
+    fn abstract_defs_emit_info_diagnostic() {
+        let xml_defs = r#"<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+    <ThingDef Abstract="True">
+        <label>base thing</label>
+    </ThingDef>
+    <ThingDef>
+        <defName>Steel</defName>
+    </ThingDef>
+</Defs>"#;
+
+        let dir = tempfile::tempdir().unwrap();
+        let defs_dir = dir.path().join("Defs");
+        std::fs::create_dir_all(&defs_dir).unwrap();
+        std::fs::write(defs_dir.join("ThingDefs.xml"), xml_defs).unwrap();
+
+        let m = rcd_core::Mod {
+            package_id: "test.abstract".to_string(),
+            name: "Abstract Test".to_string(),
+            author: None,
+            is_base_content: false,
+            root_path: dir.path().to_path_buf(),
+            supported_versions: vec![],
+            dependencies: vec![],
+            incompatibilities: vec![],
+            load_before: vec![],
+            load_after: vec![],
+            force_load_before: vec![],
+            force_load_after: vec![],
+            defs_paths: vec![defs_dir],
+            patches_paths: vec![],
+            assemblies_paths: vec![],
+        };
+
+        let detector = XmlDetector;
+        let (_conflicts, diagnostics) = detector.analyze(&[m], None);
+
+        let abstract_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.message.contains("abstract def"))
+            .collect();
+
+        assert_eq!(abstract_diags.len(), 1);
+        assert_eq!(abstract_diags[0].severity, Severity::Info);
+        assert!(abstract_diags[0].message.contains("1 abstract def"));
+        assert_eq!(
+            abstract_diags[0].affected_mod.as_deref(),
+            Some("test.abstract")
         );
     }
 }
