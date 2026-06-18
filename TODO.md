@@ -60,8 +60,6 @@
 
 - [x] **Path traversal via `game_version`** — Used without validation in path construction. Validate against `r"^[0-9]+\.[0-9]+$"`.
 
-- [ ] **No XML depth limit** — See robustness section above.
-
 ## Deferred Features (from spec)
 
 - [ ] **C# RimWorld mod** — P/Invoke into rcd-ffi, `[StaticConstructorOnStartup]` lifecycle, in-game UI with Verse widgets, DllMap for cross-platform native library loading. Separate implementation plan needed.
