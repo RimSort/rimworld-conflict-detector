@@ -208,7 +208,10 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, crate::Severity::Warning);
         assert!(diagnostics[0].message.contains("BrokenMod"));
-        assert_eq!(diagnostics[0].source, crate::DiagnosticSource::FolderResolution);
+        assert_eq!(
+            diagnostics[0].source,
+            crate::DiagnosticSource::FolderResolution
+        );
     }
 
     #[test]
@@ -221,8 +224,7 @@ mod tests {
         let file = dir.path().join("not_a_dir");
         std::fs::write(&file, "x").unwrap();
 
-        let (mods, diagnostics) =
-            discover_mods(&[dir.path().join("does_not_exist"), file], None);
+        let (mods, diagnostics) = discover_mods(&[dir.path().join("does_not_exist"), file], None);
         assert!(mods.is_empty());
         assert!(diagnostics.is_empty());
     }

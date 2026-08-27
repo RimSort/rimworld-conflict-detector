@@ -340,7 +340,8 @@ mod tests {
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
-                raw_xml: "<ThingDef><defName>Steel</defName><label>a &lt; b</label></ThingDef>".to_string(),
+                raw_xml: "<ThingDef><defName>Steel</defName><label>a &lt; b</label></ThingDef>"
+                    .to_string(),
                 source_file: "c.xml".to_string(),
             }],
         };
@@ -349,13 +350,21 @@ mod tests {
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
-                raw_xml: "<ThingDef><defName>Steel</defName><label>a &gt; b</label></ThingDef>".to_string(),
+                raw_xml: "<ThingDef><defName>Steel</defName><label>a &gt; b</label></ThingDef>"
+                    .to_string(),
                 source_file: "d.xml".to_string(),
             }],
         };
         let (conflicts, errors) = detect_replacements(&[mod_c, mod_d], None);
-        assert!(errors.is_empty(), "escaped content must not error: {errors:?}");
-        assert_eq!(conflicts.len(), 1, "genuinely divergent defs still conflict");
+        assert!(
+            errors.is_empty(),
+            "escaped content must not error: {errors:?}"
+        );
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "genuinely divergent defs still conflict"
+        );
     }
 
     #[test]
@@ -376,7 +385,8 @@ mod tests {
             defs: vec![ParsedDef {
                 def_type: "ThingDef".to_string(),
                 def_name: "Steel".to_string(),
-                raw_xml: "<ThingDef><defName>Steel</defName><label>b</label></ThingDef>".to_string(),
+                raw_xml: "<ThingDef><defName>Steel</defName><label>b</label></ThingDef>"
+                    .to_string(),
                 source_file: "b.xml".to_string(),
             }],
         };
@@ -384,8 +394,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e
-                    .starts_with("internal XML reconstruction error for ThingDef:Steel: ")),
+                .any(|e| e.starts_with("internal XML reconstruction error for ThingDef:Steel: ")),
             "expected pinned reconstruction message, got: {errors:?}"
         );
     }

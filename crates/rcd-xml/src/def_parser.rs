@@ -120,7 +120,8 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, V
                     });
 
                     // Collect the entire def element's inner content
-                    match parse_single_def(&mut reader, &tag_name, is_abstract, source, &mut errors) {
+                    match parse_single_def(&mut reader, &tag_name, is_abstract, source, &mut errors)
+                    {
                         Some(parsed) => defs.push(parsed),
                         None if is_abstract => abstract_skipped += 1,
                         None => {}
@@ -430,7 +431,10 @@ mod tests {
     <ThingDef"#;
 
         let (defs, _skipped, errors) = parse_defs_from_xml(xml, "test.xml");
-        assert!(defs.iter().any(|d| d.def_name == "Good"), "valid def before the error should be kept");
+        assert!(
+            defs.iter().any(|d| d.def_name == "Good"),
+            "valid def before the error should be kept"
+        );
         assert!(!errors.is_empty(), "parse error must be reported");
         assert!(errors.iter().all(|e| e.contains("test.xml")));
     }
@@ -441,13 +445,17 @@ mod tests {
         // structural parser alone reports nothing; the pre-check must catch it.
         let xml = r#"<Defs><ThingDef><defName><![CDATA[Steel</defName><label>x</label></ThingDef></Defs>"#;
         let (_defs, _skipped, errors) = parse_defs_from_xml(xml, "t.xml");
-        assert!(!errors.is_empty(), "pre-check must surface the malformed document");
+        assert!(
+            !errors.is_empty(),
+            "pre-check must surface the malformed document"
+        );
         assert!(errors.iter().all(|e| e.contains("t.xml")));
     }
 
     #[test]
     fn escaped_entities_survive_raw_xml_reconstruction() {
-        let xml = r#"<Defs><ThingDef><defName>Steel</defName><label>a &lt; b</label></ThingDef></Defs>"#;
+        let xml =
+            r#"<Defs><ThingDef><defName>Steel</defName><label>a &lt; b</label></ThingDef></Defs>"#;
         let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty());
         assert_eq!(defs[0].def_name, "Steel");

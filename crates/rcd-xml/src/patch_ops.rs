@@ -373,7 +373,11 @@ fn parse_conditional(
 
 /// Read a list of `<li>text</li>` elements from the current element (e.g., `<mods>`).
 /// Consumes through the closing tag of the parent element.
-fn read_li_text_list(reader: &mut Reader<&[u8]>, source: &str, errors: &mut Vec<String>) -> Vec<String> {
+fn read_li_text_list(
+    reader: &mut Reader<&[u8]>,
+    source: &str,
+    errors: &mut Vec<String>,
+) -> Vec<String> {
     let mut items = Vec::new();
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
@@ -771,7 +775,10 @@ mod tests {
     <Operation Class="PatchOperationAdd"#;
 
         let (ops, errors) = parse_patches_from_xml(xml, "test.xml");
-        assert!(ops.iter().any(|o| o.xpath.contains("Steel")), "valid op before the error should be kept");
+        assert!(
+            ops.iter().any(|o| o.xpath.contains("Steel")),
+            "valid op before the error should be kept"
+        );
         assert!(!errors.is_empty(), "parse error must be reported");
         assert!(errors.iter().all(|e| e.contains("test.xml")));
     }
@@ -780,7 +787,10 @@ mod tests {
     fn unclosed_cdata_in_xpath_yields_diagnostic_via_precheck() {
         let xml = r#"<Patch><Operation Class="PatchOperationReplace"><xpath><![CDATA[Defs/ThingDef</xpath><value><label>x</label></value></Operation></Patch>"#;
         let (_ops, errors) = parse_patches_from_xml(xml, "t.xml");
-        assert!(!errors.is_empty(), "pre-check must surface the malformed document");
+        assert!(
+            !errors.is_empty(),
+            "pre-check must surface the malformed document"
+        );
         assert!(errors.iter().all(|e| e.contains("t.xml")));
     }
 }
