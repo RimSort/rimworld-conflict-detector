@@ -103,8 +103,17 @@ impl Detector for XmlDetector {
         }
 
         // 3. Detect direct replacement conflicts
-        let replacement_conflicts = replacement::detect_replacements(&all_mod_defs, order);
+        let (replacement_conflicts, recon_errors) =
+            replacement::detect_replacements(&all_mod_defs, order);
         all_conflicts.extend(replacement_conflicts);
+        for msg in recon_errors {
+            all_diagnostics.push(Diagnostic {
+                affected_mod: None,
+                severity: Severity::Warning,
+                message: msg,
+                source: DiagnosticSource::XmlParsing,
+            });
+        }
 
         // 4. Build replacement map for XPath conflict detection
         let replacement_map = build_replacement_map(&all_mod_defs);

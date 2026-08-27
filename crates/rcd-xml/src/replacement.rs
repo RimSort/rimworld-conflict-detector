@@ -16,7 +16,14 @@ pub struct ModDefs {
 ///
 /// When a load order is provided, the winner is determined as the last mod
 /// in the load order (RimWorld's last-wins semantics).
-pub fn detect_replacements(all_mod_defs: &[ModDefs], order: Option<&LoadOrder>) -> Vec<Conflict> {
+///
+/// Returns `(conflicts, internal_reconstruction_errors)`; the second vec
+/// surfaces Errs from parsing our own reconstructed raw_xml — a
+/// reconstruction bug, not user-input malformation.
+pub fn detect_replacements(
+    all_mod_defs: &[ModDefs],
+    order: Option<&LoadOrder>,
+) -> (Vec<Conflict>, Vec<String>) {
     // Build a map: (def_type, def_name) -> Vec<(ModSummary, raw_xml)>
     type DefEntries = Vec<(ModSummary, String)>;
     let mut def_map: HashMap<(String, String), DefEntries> = HashMap::new();
@@ -32,6 +39,7 @@ pub fn detect_replacements(all_mod_defs: &[ModDefs], order: Option<&LoadOrder>) 
     }
 
     let mut conflicts = Vec::new();
+    let mut errors = Vec::new();
 
     for ((def_type, def_name), entries) in &def_map {
         if entries.len() < 2 {
@@ -58,7 +66,8 @@ pub fn detect_replacements(all_mod_defs: &[ModDefs], order: Option<&LoadOrder>) 
         }
 
         // Find divergent fields by comparing the first entry against each subsequent one
-        let divergent_fields = find_divergent_fields(entries);
+        let divergent_fields =
+            find_divergent_fields(entries, &format!("{def_type}:{def_name}"), &mut errors);
 
         let mods: Vec<ModSummary> = entries.iter().map(|(ms, _)| ms.clone()).collect();
 
@@ -82,7 +91,7 @@ pub fn detect_replacements(all_mod_defs: &[ModDefs], order: Option<&LoadOrder>) 
         }));
     }
 
-    conflicts
+    (conflicts, errors)
 }
 
 /// Normalizes an XML string for semantic comparison by re-parsing it and
@@ -132,7 +141,11 @@ fn normalize_whitespace(s: &str) -> String {
 
 /// Finds fields that differ between def entries by doing a simple line-level comparison.
 /// Returns a list of tag names that appear to differ.
-fn find_divergent_fields(entries: &[(ModSummary, String)]) -> Vec<String> {
+fn find_divergent_fields(
+    entries: &[(ModSummary, String)],
+    def_id: &str,
+    errors: &mut Vec<String>,
+) -> Vec<String> {
     if entries.len() < 2 {
         return Vec::new();
     }
@@ -144,12 +157,12 @@ fn find_divergent_fields(entries: &[(ModSummary, String)]) -> Vec<String> {
         let other_normalized = normalize_whitespace(&entry.1);
         if base_normalized != other_normalized {
             // Simple heuristic: find top-level child tags that differ
-            let base_tags = extract_child_tags(&entries[0].1);
-            let other_tags = extract_child_tags(&entry.1);
+            let base_tags = extract_child_tags(&entries[0].1, def_id, errors);
+            let other_tags = extract_child_tags(&entry.1, def_id, errors);
 
             for tag in &base_tags {
-                let base_content = extract_tag_content(&entries[0].1, tag);
-                let other_content = extract_tag_content(&entry.1, tag);
+                let base_content = extract_tag_content(&entries[0].1, tag, def_id, errors);
+                let other_content = extract_tag_content(&entry.1, tag, def_id, errors);
                 if base_content != other_content && !divergent.contains(tag) {
                     divergent.push(tag.clone());
                 }
@@ -168,7 +181,7 @@ fn find_divergent_fields(entries: &[(ModSummary, String)]) -> Vec<String> {
 
 /// Extracts immediate child tag names from a def's raw XML.
 /// Very simple: looks for `<TagName>` patterns at the first nesting level.
-fn extract_child_tags(xml: &str) -> Vec<String> {
+fn extract_child_tags(xml: &str, def_id: &str, errors: &mut Vec<String>) -> Vec<String> {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -204,7 +217,13 @@ fn extract_child_tags(xml: &str) -> Vec<String> {
                 depth -= 1;
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!(
+                    "internal XML reconstruction error for {}: {}",
+                    def_id, e
+                ));
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -215,7 +234,12 @@ fn extract_child_tags(xml: &str) -> Vec<String> {
 
 /// Extracts the content of a specific child tag from a def's raw XML.
 /// Returns the normalized inner text/XML for comparison.
-fn extract_tag_content(xml: &str, target_tag: &str) -> Option<String> {
+fn extract_tag_content(
+    xml: &str,
+    target_tag: &str,
+    def_id: &str,
+    errors: &mut Vec<String>,
+) -> Option<String> {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -263,7 +287,13 @@ fn extract_tag_content(xml: &str, target_tag: &str) -> Option<String> {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!(
+                    "internal XML reconstruction error for {}: {}",
+                    def_id, e
+                ));
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -276,6 +306,28 @@ fn extract_tag_content(xml: &str, target_tag: &str) -> Option<String> {
 mod tests {
     use super::*;
     use rcd_core::testutil::test_mod_summary_named;
+
+    #[test]
+    fn detect_replacements_reports_internal_reconstruction_errors() {
+        // raw_xml is OUR reconstruction; a parse Err here means a reconstruction
+        // bug, which must surface as a diagnostic rather than vanish. Well-formed
+        // input must keep the errors vec empty.
+        let mod_a = ModDefs {
+            mod_summary: test_mod_summary_named("test.mod.a", "Mod A"),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".to_string(),
+                def_name: "Steel".to_string(),
+                raw_xml: "<ThingDef><defName>Steel</defName></ThingDef>".to_string(),
+                source_file: "a.xml".to_string(),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(&[mod_a.clone(), mod_a], None);
+        assert!(conflicts.is_empty());
+        assert!(
+            errors.is_empty(),
+            "well-formed reconstructed XML must not report: {errors:?}"
+        );
+    }
 
     #[test]
     fn detect_direct_replacement() {
@@ -301,8 +353,9 @@ mod tests {
             }],
         };
 
-        let conflicts = detect_replacements(&[mod_a, mod_b], None);
+        let (conflicts, errors) = detect_replacements(&[mod_a, mod_b], None);
         assert_eq!(conflicts.len(), 1);
+        assert!(errors.is_empty());
 
         match &conflicts[0] {
             Conflict::Def(dc) => {
@@ -345,7 +398,7 @@ mod tests {
             }],
         };
 
-        let conflicts = detect_replacements(&[mod_a, mod_b], None);
+        let (conflicts, _errors) = detect_replacements(&[mod_a, mod_b], None);
         assert_eq!(
             conflicts.len(),
             0,
@@ -381,7 +434,7 @@ mod tests {
             package_ids: vec!["test.mod.a".to_string(), "test.mod.b".to_string()],
         };
 
-        let conflicts = detect_replacements(&[mod_a, mod_b], Some(&load_order));
+        let (conflicts, _errors) = detect_replacements(&[mod_a, mod_b], Some(&load_order));
         assert_eq!(conflicts.len(), 1);
 
         match &conflicts[0] {
@@ -424,7 +477,7 @@ mod tests {
             }],
         };
 
-        let conflicts = detect_replacements(&[mod_a, mod_b], None);
+        let (conflicts, _errors) = detect_replacements(&[mod_a, mod_b], None);
         assert_eq!(
             conflicts.len(),
             0,
@@ -456,7 +509,7 @@ mod tests {
             }],
         };
 
-        let conflicts = detect_replacements(&[mod_a, mod_b], None);
+        let (conflicts, _errors) = detect_replacements(&[mod_a, mod_b], None);
         assert_eq!(conflicts.len(), 1);
 
         match &conflicts[0] {
@@ -498,7 +551,7 @@ mod tests {
             ],
         };
 
-        let conflicts = detect_replacements(&[mod_defs], None);
+        let (conflicts, _errors) = detect_replacements(&[mod_defs], None);
         assert_eq!(
             conflicts.len(),
             0,
