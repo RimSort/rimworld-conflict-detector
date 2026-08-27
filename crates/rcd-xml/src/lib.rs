@@ -151,7 +151,7 @@ mod integration_tests {
 
     #[test]
     fn xml_detector_finds_steel_conflict() {
-        let mods = discover_mods(&[fixtures_path()], Some("1.5"));
+        let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
         let detector = XmlDetector;
         let (conflicts, _diagnostics) = detector.analyze(&mods, None);
 
@@ -202,7 +202,7 @@ mod integration_tests {
 
     #[test]
     fn versioned_mod_no_self_conflict() {
-        let mods = discover_mods(&[fixtures_path()], Some("1.5"));
+        let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
         let versioned = mods.iter().find(|m| m.package_id == "test.mod.versioned");
         assert!(versioned.is_some(), "Should find versioned fixture mod");
 

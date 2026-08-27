@@ -20,7 +20,7 @@ fn run_analysis(mods: &[Mod], order: Option<&LoadOrder>) -> Report {
 
 #[test]
 fn detect_direct_replacement_conflict() {
-    let mods = discover_mods(&[fixtures_path()], Some("1.5"));
+    let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
     let report = run_analysis(&mods, None);
 
     // Should find ThingDef:Steel replacement conflict
@@ -34,14 +34,14 @@ fn detect_direct_replacement_conflict() {
 
 #[test]
 fn report_has_correct_schema_version() {
-    let mods = discover_mods(&[fixtures_path()], Some("1.5"));
+    let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
     let report = run_analysis(&mods, None);
     assert_eq!(report.schema_version, 1);
 }
 
 #[test]
 fn report_json_is_valid() {
-    let mods = discover_mods(&[fixtures_path()], Some("1.5"));
+    let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
     let report = run_analysis(&mods, None);
     let json = serde_json::to_string_pretty(&report).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -50,7 +50,7 @@ fn report_json_is_valid() {
 
 #[test]
 fn order_aware_reports_winner() {
-    let mods = discover_mods(&[fixtures_path()], Some("1.5"));
+    let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
     let order = LoadOrder {
         package_ids: mods.iter().map(|m| m.package_id.clone()).collect(),
     };
@@ -69,7 +69,7 @@ fn order_aware_reports_winner() {
 
 #[test]
 fn summary_counts_match_conflicts() {
-    let mods = discover_mods(&[fixtures_path()], Some("1.5"));
+    let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
     let report = run_analysis(&mods, None);
 
     let actual_errors = report

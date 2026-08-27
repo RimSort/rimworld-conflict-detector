@@ -16,3 +16,4 @@ thiserror = { workspace = true }
 [dev-dependencies]
 rcd-xml = { workspace = true }
 rcd-harmony = { workspace = true }
+tempfile = { workspace = true }

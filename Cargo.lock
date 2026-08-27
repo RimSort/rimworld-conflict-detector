@@ -647,6 +647,7 @@ dependencies = [
  "rcd-xml",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

@@ -13,12 +13,12 @@ pub struct ResolvedMods {
 
 /// Resolve mods from a directory scan (order-agnostic).
 pub fn resolve_from_dir(dir: &Path, game_version: Option<&str>) -> ResolvedMods {
-    let mut mods = discover_mods(&[dir.to_path_buf()], game_version);
+    let (mut mods, diagnostics) = discover_mods(&[dir.to_path_buf()], game_version);
     mark_base_content(&mut mods);
     ResolvedMods {
         mods,
         load_order: None,
-        diagnostics: vec![],
+        diagnostics,
     }
 }
 
@@ -96,7 +96,7 @@ pub fn resolve_from_config(
         search_dirs.push(workshop);
     }
 
-    let available = discover_mods(&search_dirs, version.as_deref());
+    let (available, mut diagnostics) = discover_mods(&search_dirs, version.as_deref());
 
     // Build packageId -> Mod map
     let mut mod_map: std::collections::HashMap<String, Mod> = std::collections::HashMap::new();
@@ -106,7 +106,6 @@ pub fn resolve_from_config(
 
     // Resolve active mods in load order
     let mut mods = Vec::new();
-    let mut diagnostics = Vec::new();
     for package_id in &config.active_mods {
         match mod_map.remove(package_id) {
             Some(m) => {
