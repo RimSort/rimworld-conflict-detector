@@ -112,9 +112,7 @@ mod tests {
             test_mod("mod.a", vec!["mod.b"], vec![]),
             test_mod("mod.b", vec![], vec![]),
         ];
-        let order = LoadOrder {
-            package_ids: vec!["mod.a".into(), "mod.b".into()],
-        };
+        let order = LoadOrder::new(vec!["mod.a".into(), "mod.b".into()]);
         // mod.a says loadAfter mod.b, but mod.a is position 0 and mod.b is position 1
         let diags = validate_load_order(&mods, &order);
         assert_eq!(diags.len(), 1);
@@ -128,9 +126,7 @@ mod tests {
             test_mod("mod.a", vec![], vec![]),
             test_mod("mod.b", vec!["mod.a"], vec![]),
         ];
-        let order = LoadOrder {
-            package_ids: vec!["mod.a".into(), "mod.b".into()],
-        };
+        let order = LoadOrder::new(vec!["mod.a".into(), "mod.b".into()]);
         // mod.b says loadAfter mod.a, and it IS after — correct
         let diags = validate_load_order(&mods, &order);
         assert!(diags.is_empty());
@@ -142,9 +138,7 @@ mod tests {
             test_mod("mod.a", vec![], vec![]),
             test_mod("mod.b", vec![], vec!["mod.a"]),
         ];
-        let order = LoadOrder {
-            package_ids: vec!["mod.a".into(), "mod.b".into()],
-        };
+        let order = LoadOrder::new(vec!["mod.a".into(), "mod.b".into()]);
         // mod.b says loadBefore mod.a, but mod.b is at position 1 (after mod.a at 0)
         let diags = validate_load_order(&mods, &order);
         assert_eq!(diags.len(), 1);

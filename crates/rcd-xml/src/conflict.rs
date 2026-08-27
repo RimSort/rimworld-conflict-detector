@@ -340,9 +340,7 @@ mod tests {
             ),
         ];
 
-        let load_order = LoadOrder {
-            package_ids: vec!["test.mod.c".to_string(), "test.mod.d".to_string()],
-        };
+        let load_order = LoadOrder::new(vec!["test.mod.c".to_string(), "test.mod.d".to_string()]);
 
         let replacement_defs = HashMap::new();
         let conflicts = detect_xpath_conflicts(&patches, &replacement_defs, Some(&load_order));

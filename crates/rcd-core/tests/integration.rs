@@ -51,9 +51,7 @@ fn report_json_is_valid() {
 #[test]
 fn order_aware_reports_winner() {
     let mods = discover_mods(&[fixtures_path()], Some("1.5"));
-    let order = LoadOrder {
-        package_ids: mods.iter().map(|m| m.package_id.clone()).collect(),
-    };
+    let order = LoadOrder::new(mods.iter().map(|m| m.package_id.clone()).collect());
     let report = run_analysis(&mods, Some(&order));
 
     // With load order, some conflicts should have a winner

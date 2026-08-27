@@ -58,9 +58,9 @@ pub unsafe extern "C" fn rcd_analyze(
         }
 
         let load_order = if ordered {
-            Some(rcd_core::LoadOrder {
-                package_ids: mods.iter().map(|m| m.package_id.clone()).collect(),
-            })
+            Some(rcd_core::LoadOrder::new(
+                mods.iter().map(|m| m.package_id.clone()).collect(),
+            ))
         } else {
             None
         };
