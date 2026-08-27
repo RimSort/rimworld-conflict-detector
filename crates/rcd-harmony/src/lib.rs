@@ -95,14 +95,27 @@ impl Detector for HarmonyDetector {
                                 crate::manual::detect_manual_patches(&dll_path)
                             }));
 
-                        if let Ok(hints) = manual_result {
-                            for hint in hints {
+                        match manual_result {
+                            Ok(hints) => {
+                                for hint in hints {
+                                    diagnostics.push(Diagnostic {
+                                        affected_mod: Some(mod_summary.package_id.clone()),
+                                        severity: Severity::Info,
+                                        message: format!(
+                                            "Possible manual patch hint in {}: {} (best-effort heuristic, may be a false positive)",
+                                            hint.dll_name, hint.possible_method
+                                        ),
+                                        source: DiagnosticSource::DllParsing,
+                                    });
+                                }
+                            }
+                            Err(_) => {
                                 diagnostics.push(Diagnostic {
                                     affected_mod: Some(mod_summary.package_id.clone()),
-                                    severity: Severity::Info,
+                                    severity: Severity::Warning,
                                     message: format!(
-                                        "Possible manual patch hint in {}: {} (best-effort heuristic, may be a false positive)",
-                                        hint.dll_name, hint.possible_method
+                                        "Manual patch detection panicked while scanning {} (caught; results for this DLL may be incomplete)",
+                                        dll_name
                                     ),
                                     source: DiagnosticSource::DllParsing,
                                 });
@@ -133,6 +146,34 @@ impl Detector for HarmonyDetector {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manual_scan_panic_emits_warning_diagnostic() {
+        use crate::HarmonyDetector;
+        use rcd_core::Detector;
+
+        let m = rcd_core::Mod {
+            package_id: "test.panic".to_string(),
+            name: "Panic Test".to_string(),
+            author: None,
+            is_base_content: false,
+            root_path: std::path::PathBuf::new(),
+            supported_versions: vec![],
+            dependencies: vec![],
+            incompatibilities: vec![],
+            load_before: vec![],
+            load_after: vec![],
+            force_load_before: vec![],
+            force_load_after: vec![],
+            defs_paths: vec![],
+            patches_paths: vec![],
+            assemblies_paths: vec![],
+        };
+
+        // No assemblies → no panics possible; this pins the non-panic contract.
+        let (_conflicts, diagnostics) = HarmonyDetector.analyze(&[m], None);
+        assert!(diagnostics.is_empty());
+    }
+
     #[test]
     fn analyze_emits_manual_patch_diagnostics() {
         use crate::HarmonyDetector;
