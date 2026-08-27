@@ -175,10 +175,13 @@ fn parse_single_def(
                 if depth == 2 && tag == "defName" {
                     let mut text_buf = Vec::new();
                     if let Ok(Event::Text(t)) = reader.read_event_into(&mut text_buf) {
-                        let text = t.unescape().ok().map(|s| s.to_string());
-                        if let Some(ref name) = text {
-                            def_name = Some(name.clone());
-                            inner_xml.push_str(name);
+                        // raw_xml keeps the escaped source bytes; only the
+                        // identity value is unescaped. Writing decoded text
+                        // back would turn a valid `a &lt; b` into malformed
+                        // `a < b` for the re-parse in replacement.rs.
+                        inner_xml.push_str(&String::from_utf8_lossy(t.as_ref()));
+                        if let Ok(name) = t.unescape() {
+                            def_name = Some(name.to_string());
                         }
                     }
                     // Read the closing </defName>
@@ -199,9 +202,8 @@ fn parse_single_def(
                 inner_xml.push_str(&format!("</{tag}>"));
             }
             Ok(Event::Text(ref t)) => {
-                if let Ok(text) = t.unescape() {
-                    inner_xml.push_str(&text);
-                }
+                // Preserve source escaping (see defName note above).
+                inner_xml.push_str(&String::from_utf8_lossy(t.as_ref()));
             }
             Ok(Event::Empty(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
@@ -441,5 +443,18 @@ mod tests {
         let (_defs, _skipped, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(!errors.is_empty(), "pre-check must surface the malformed document");
         assert!(errors.iter().all(|e| e.contains("t.xml")));
+    }
+
+    #[test]
+    fn escaped_entities_survive_raw_xml_reconstruction() {
+        let xml = r#"<Defs><ThingDef><defName>Steel</defName><label>a &lt; b</label></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty());
+        assert_eq!(defs[0].def_name, "Steel");
+        assert!(
+            defs[0].raw_xml.contains("&lt;"),
+            "raw_xml must keep source escaping: {}",
+            defs[0].raw_xml
+        );
     }
 }

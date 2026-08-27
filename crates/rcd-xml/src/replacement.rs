@@ -91,6 +91,11 @@ pub fn detect_replacements(
         }));
     }
 
+    // Byte-identical reconstruction errors repeat per comparison pair and
+    // def_map iteration order is nondeterministic run-to-run; canonicalize.
+    errors.sort();
+    errors.dedup();
+
     (conflicts, errors)
 }
 
@@ -326,6 +331,62 @@ mod tests {
         assert!(
             errors.is_empty(),
             "well-formed reconstructed XML must not report: {errors:?}"
+        );
+
+        // Escaped content must survive the re-parse in find_divergent_fields
+        // without triggering reconstruction errors (I-3 regression guard).
+        let mod_c = ModDefs {
+            mod_summary: test_mod_summary_named("test.mod.c", "Mod C"),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".to_string(),
+                def_name: "Steel".to_string(),
+                raw_xml: "<ThingDef><defName>Steel</defName><label>a &lt; b</label></ThingDef>".to_string(),
+                source_file: "c.xml".to_string(),
+            }],
+        };
+        let mod_d = ModDefs {
+            mod_summary: test_mod_summary_named("test.mod.d", "Mod D"),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".to_string(),
+                def_name: "Steel".to_string(),
+                raw_xml: "<ThingDef><defName>Steel</defName><label>a &gt; b</label></ThingDef>".to_string(),
+                source_file: "d.xml".to_string(),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(&[mod_c, mod_d], None);
+        assert!(errors.is_empty(), "escaped content must not error: {errors:?}");
+        assert_eq!(conflicts.len(), 1, "genuinely divergent defs still conflict");
+    }
+
+    #[test]
+    fn reconstruction_error_message_is_pinned() {
+        // Two DISTINCT package ids so the same-def entries actually reach
+        // find_divergent_fields (identical ids or identical XML short-circuit).
+        let mod_a = ModDefs {
+            mod_summary: test_mod_summary_named("test.mod.a", "Mod A"),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".to_string(),
+                def_name: "Steel".to_string(),
+                raw_xml: "<ThingDef><defName>Steel</defName><label>a</label></ThingX>".to_string(),
+                source_file: "a.xml".to_string(),
+            }],
+        };
+        let mod_b = ModDefs {
+            mod_summary: test_mod_summary_named("test.mod.b", "Mod B"),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".to_string(),
+                def_name: "Steel".to_string(),
+                raw_xml: "<ThingDef><defName>Steel</defName><label>b</label></ThingDef>".to_string(),
+                source_file: "b.xml".to_string(),
+            }],
+        };
+        let (_conflicts, errors) = detect_replacements(&[mod_a, mod_b], None);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e
+                    .starts_with("internal XML reconstruction error for ThingDef:Steel: ")),
+            "expected pinned reconstruction message, got: {errors:?}"
         );
     }
 
