@@ -326,7 +326,14 @@ mod tests {
                 source_file: "a.xml".to_string(),
             }],
         };
-        let (conflicts, errors) = detect_replacements(&[mod_a.clone(), mod_a], None);
+        let mod_b = ModDefs {
+            mod_summary: test_mod_summary_named("test.mod.b", "Mod B"),
+            defs: mod_a.defs.clone(),
+        };
+        // DISTINCT package ids so the comparison path actually runs (same-id
+        // pairs short-circuit before any parsing, making errors.is_empty()
+        // vacuous); identical XML keeps all_identical suppressing the conflict.
+        let (conflicts, errors) = detect_replacements(&[mod_a, mod_b], None);
         assert!(conflicts.is_empty());
         assert!(
             errors.is_empty(),

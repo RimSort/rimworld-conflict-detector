@@ -181,8 +181,14 @@ fn parse_single_def(
                         // back would turn a valid `a &lt; b` into malformed
                         // `a < b` for the re-parse in replacement.rs.
                         inner_xml.push_str(&String::from_utf8_lossy(t.as_ref()));
-                        if let Ok(name) = t.unescape() {
-                            def_name = Some(name.to_string());
+                        match t.unescape() {
+                            // trim() decouples identity from the reader's
+                            // trim_text config (matches patch_ops convention).
+                            Ok(name) => def_name = Some(name.trim().to_string()),
+                            // An undecodable defName drops the def (identity is
+                            // unknown) — say so instead of vanishing silently.
+                            Err(e) => errors
+                                .push(format!("defName in {} could not be decoded: {}", source, e)),
                         }
                     }
                     // Read the closing </defName>
@@ -210,6 +216,15 @@ fn parse_single_def(
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 let attrs = build_attrs_string(e);
                 inner_xml.push_str(&format!("<{tag}{attrs}/>"));
+            }
+            Ok(Event::CData(ref c)) => {
+                // Re-emit verbatim; `]]>` is illegal inside CDATA, so the
+                // wrapper round-trips safely. Dropping CDATA masked real
+                // divergences in the replacement diff.
+                inner_xml.push_str(&format!(
+                    "<![CDATA[{}]]>",
+                    String::from_utf8_lossy(c.as_ref())
+                ));
             }
             Ok(Event::Eof) => break,
             Err(e) => {
@@ -462,6 +477,58 @@ mod tests {
         assert!(
             defs[0].raw_xml.contains("&lt;"),
             "raw_xml must keep source escaping: {}",
+            defs[0].raw_xml
+        );
+    }
+
+    #[test]
+    fn defname_identity_decoded_but_raw_xml_keeps_escaping() {
+        let xml =
+            r#"<Defs><ThingDef><defName>a &lt; b</defName><label>x</label></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(defs[0].def_name, "a < b", "identity must be decoded");
+        assert!(
+            defs[0].raw_xml.contains("<defName>a &lt; b</defName>"),
+            "raw_xml must keep escaping: {}",
+            defs[0].raw_xml
+        );
+    }
+
+    #[test]
+    fn undecodable_defname_reports_instead_of_vanishing() {
+        let xml = r#"<Defs><ThingDef><defName>bad &foo; entity</defName></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(defs.is_empty());
+        assert!(
+            errors.iter().any(|e| e.contains("could not be decoded")),
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn cdata_content_survives_raw_xml_reconstruction() {
+        let xml = r#"<Defs><ThingDef><defName>Steel</defName><label><![CDATA[a < b]]></label></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            defs[0].raw_xml.contains("<![CDATA[a < b]]>"),
+            "raw_xml must carry CDATA verbatim: {}",
+            defs[0].raw_xml
+        );
+    }
+
+    #[test]
+    fn attribute_escaping_survives_raw_xml_reconstruction() {
+        // NOTE: exercises build_attrs_string via CHILD elements. Root def opening
+        // tags drop their attributes entirely (`<{{def_type}}>` reconstruction) —
+        // that's the separate tracked P0 item, out of scope here.
+        let xml = r#"<Defs><ThingDef><defName>Steel</defName><costList><li Name="a &lt; b">x</li></costList></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            defs[0].raw_xml.contains(r#"Name="a &lt; b""#),
+            "build_attrs_string must emit raw (escaped) attribute bytes: {}",
             defs[0].raw_xml
         );
     }
