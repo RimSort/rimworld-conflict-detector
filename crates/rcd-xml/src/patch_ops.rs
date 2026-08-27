@@ -753,4 +753,21 @@ mod tests {
         assert_eq!(ops.len(), 1);
         assert!(errors.is_empty());
     }
+
+    #[test]
+    fn malformed_patches_xml_reports_error_and_keeps_partial_results() {
+        // Truncate mid opening-tag: quick-xml is non-validating, so truncation
+        // after well-formed text yields Ok(Eof); only a mid-tag cut produces Err.
+        let xml = r#"<Patch>
+    <Operation Class="PatchOperationReplace">
+        <xpath>Defs/ThingDef[defName="Steel"]/label</xpath>
+        <value><label>Iron</label></value>
+    </Operation>
+    <Operation Class="PatchOperationAdd"#;
+
+        let (ops, errors) = parse_patches_from_xml(xml, "test.xml");
+        assert!(ops.iter().any(|o| o.xpath.contains("Steel")), "valid op before the error should be kept");
+        assert!(!errors.is_empty(), "parse error must be reported");
+        assert!(errors.iter().all(|e| e.contains("test.xml")));
+    }
 }
