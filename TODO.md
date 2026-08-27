@@ -22,7 +22,7 @@
 
 - [ ] **`PatchOperationSequence` success attribute** — Parsed but the `success` attribute is not read or used. For static analysis the safer direction is to assume all operations execute, but documenting the limitation would help.
 
-- [x] **`is_base_content` only set in `--config` mode** — `--dir` and `--mods` modes never mark Core/DLC mods. Apply the `ludeon.*` heuristic in all resolution paths.
+- [x] **`is_base_content` only set in `--config` mode** — `--dir` and `--mods` modes never mark Core/DLC mods. Apply the `ludeon.*` heuristic in all resolution paths. *Note: FFI path (`rcd_analyze`) still does not apply this heuristic — see review findings above.*
 
 - [x] **FFI timestamp empty** — `rcd_analyze` sets `timestamp: String::new()`. Should use a real ISO 8601 timestamp (add chrono as an rcd-ffi dependency or pass it through the config JSON).
 
@@ -34,7 +34,7 @@
 
 - [x] **Silent file I/O errors** — `def_parser`, `patch_ops`, `discover_assemblies` all use `.filter_map(|e| e.ok())` on walkdir iterators and `continue` on read failures. Should propagate as diagnostics.
 
-- [ ] **`defName` parser fragility** — Assumes the next event after `<defName>` opening tag is `Event::Text`. Comments or CDATA would cause silent failure.
+- [ ] **`defName` parser fragility** — Assumes the next event after `<defName>` opening tag is `Event::Text`. Comments or CDATA would cause silent failure. Worse: empty elements (`<defName></defName>`) cause parser desynchronization that swallows all subsequent sibling defs/operations (see review finding above).
 
 - [ ] **No file size limits** — All file reads are unbounded. Add a reasonable max (e.g., 50MB) as a defensive measure.
 
@@ -59,6 +59,44 @@
 ## Security (low risk, local tool)
 
 - [x] **Path traversal via `game_version`** — Used without validation in path construction. Validate against `r"^[0-9]+\.[0-9]+$"`.
+
+## Codebase Review Findings (Opus review, 2025-08)
+
+### Correctness
+
+- [ ] **XPathOnReplacedDef `break` causes false negatives** — `crates/rcd-xml/src/conflict.rs:128`. Loop over `replacing_mods` breaks after the first match. If 3+ mods define the same def and a 4th patches it, only one conflict is reported instead of all pairs. The `break` is unnecessary (map is already deduplicated) and incorrect. Remove it.
+
+- [ ] **FFI `is_base_content` still not set** — `crates/rcd-ffi/src/lib.rs:54`. The CLI-side fix for this (marked `[x]` above) only covers `resolve.rs`. The FFI calls `parse_about_xml` + `resolve_mod_folders` directly without the `ludeon.*` heuristic. C# consumers always get `is_base_content: false` for Core/DLC mods.
+
+- [ ] **Raw XML reconstruction drops root def attributes** — `crates/rcd-xml/src/def_parser.rs:194`. `format!("<{def_type}>{inner_xml}</{def_type}>")` discards `Abstract`, `ParentName`, `Name` attributes from the opening tag. Two defs with identical inner content but different inheritance (e.g., one abstract, one concrete) are incorrectly considered identical, suppressing real replacement conflicts.
+
+- [ ] **Empty `<defName>`/`<xpath>` causes parser desynchronization** — `crates/rcd-xml/src/def_parser.rs:148-158` and `patch_ops.rs:316-326`. For `<defName></defName>`, the first read returns `Event::End` (not Text), then the second read consumes the *next* event — swallowing subsequent sibling defs or patch operations. Extends the "defName parser fragility" item above — the consequence is not just silent failure of one def, but cascading desync that loses all subsequent siblings.
+
+### Error Handling
+
+- [ ] **`discover_mods` silently swallows I/O and parse errors** — `crates/rcd-core/src/folder.rs:81,98`. Uses `let Ok(entries) = ... else { continue }` and `if let Ok(mut mod_data) = parse_about_xml(...)`. Callers can't distinguish "no mods found" from "all mods failed to parse." Should return `(Vec<Mod>, Vec<Diagnostic>)` consistent with `parse_defs_dir`/`parse_patches_dir`.
+
+- [ ] **FFI silently drops mods that fail to parse** — `crates/rcd-ffi/src/lib.rs:54`. Unlike the CLI which emits Error diagnostics for failed mods, the FFI boundary skips them with no visibility. Failed mods should be collected and included in `report.diagnostics`.
+
+- [ ] **XML parse errors silently ignored in def/patch parsers** — `def_parser.rs:109,180` and `patch_ops.rs:113,204,246,289,332,372,407`. Use `Err(_) => break` to silently ignore XML parse errors, returning partial results. Malformed XML containing conflicting defs produces false negatives.
+
+- [ ] **Manual patch detection panics not reported as diagnostics** — `crates/rcd-harmony/src/lib.rs:94-110`. `catch_unwind` catches the panic but emits no diagnostic, unlike `parse_harmony_patches` (lines 60-82) which emits a Warning. Should use `match` instead of `if let Ok` to emit a diagnostic on `Err`.
+
+### Performance
+
+- [ ] **O(n²) XPath conflict detection with redundant normalization** — `crates/rcd-xml/src/conflict.rs:34-45`. Nested loop compares every pair of patch operations + calls `normalize_xpath` inside the inner loop for each pair. For 739 mods × ~10 patches = ~27M comparisons. Should group patches by `(def_type, def_name)` and pre-normalize XPaths once, reducing to O(n·k) where k is avg patches per def.
+
+- [ ] **`LoadOrder::position` is O(n) linear scan in inner loops** — `crates/rcd-core/src/types.rs:48`. Called twice per overlapping pair in `detect_xpath_conflicts`, making winner determination O(n³) worst case. Should use `HashMap<String, usize>` for O(1) lookups.
+
+### Architecture / API
+
+- [ ] **`resolve_mod_folders` has dead `_active_mods` parameter** — `crates/rcd-core/src/folder.rs:21-25`. Always passed as `None`, never used. Remove and re-add when `LoadFolders.xml` conditional evaluation is implemented.
+
+- [ ] **`pub mod` leaks implementation details in rcd-xml and rcd-harmony** — Both crates declare all submodules as `pub mod`, exposing internal types (`ModDefs`, `ParsedDef`, `DiscoveredPatch`, etc.) when only `XmlDetector`/`HarmonyDetector` are consumed externally. Should be `mod` with selective re-exports.
+
+- [ ] **FFI progress callback `phase` pointer lifetime undocumented** — `crates/rcd-ffi/src/lib.rs:6`. The `CString` is dropped at end of closure, so `*const c_char` is only valid during synchronous callback. If C# consumer retains the pointer, it's use-after-free. Safety contract should document this.
+
+- [ ] **FFI config uses untyped JSON with no schema validation** — `crates/rcd-ffi/src/lib.rs:30-46`. Manual `serde_json::Value` indexing — misspelled fields silently produce defaults, type mismatches silently produce empty results. Should use a typed `RcdConfig` struct with `#[derive(Deserialize)]`.
 
 ## Deferred Features (from spec)
 
