@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use rayon::prelude::*;
 use rcd_core::{Conflict, DefConflict, DefConflictMechanism, DefTarget, LoadOrder, ModSummary};
 
 use crate::patch_ops::ParsedPatchOp;
@@ -50,67 +51,80 @@ pub fn detect_xpath_conflicts(
     let mut bucket_keys: Vec<&str> = buckets.keys().copied().collect();
     bucket_keys.sort_unstable();
 
-    for key in bucket_keys {
-        let indices = &buckets[key];
-        for ai in 0..indices.len() {
-            for bi in (ai + 1)..indices.len() {
-                let (mod_a, op_a, norm_a) = &normalized[indices[ai]];
-                let (mod_b, op_b, norm_b) = &normalized[indices[bi]];
+    // Buckets are pure computation over immutable inputs — run them in
+    // parallel. Results are concatenated in sorted-key order and the inner
+    // i<j loop stays sequential, so output order matches the sequential
+    // version exactly.
+    let conflict_buckets: Vec<Vec<Conflict>> = bucket_keys
+        .par_iter()
+        .map(|key| {
+            let indices = &buckets[key];
+            let mut bucket_conflicts = Vec::new();
+            for ai in 0..indices.len() {
+                for bi in (ai + 1)..indices.len() {
+                    let (mod_a, op_a, norm_a) = &normalized[indices[ai]];
+                    let (mod_b, op_b, norm_b) = &normalized[indices[bi]];
 
-                // Only flag conflicts between different mods
-                if mod_a.package_id == mod_b.package_id {
-                    continue;
-                }
-                if !xpaths_overlap(norm_a, norm_b) {
-                    continue;
-                }
-
-                // Build the def target from the normalized xpaths
-                let def_type = norm_a.def_type.clone().unwrap_or_default();
-                let def_name = norm_a
-                    .def_name
-                    .clone()
-                    .or_else(|| norm_b.def_name.clone())
-                    .unwrap_or_default();
-
-                // Determine winner by load order if available
-                let winner = order.and_then(|lo| {
-                    let pos_a = lo.position(&mod_a.package_id);
-                    let pos_b = lo.position(&mod_b.package_id);
-                    match (pos_a, pos_b) {
-                        (Some(pa), Some(pb)) => {
-                            if pa > pb {
-                                Some(mod_a.package_id.clone())
-                            } else {
-                                Some(mod_b.package_id.clone())
-                            }
-                        }
-                        _ => None,
+                    // Only flag conflicts between different mods
+                    if mod_a.package_id == mod_b.package_id {
+                        continue;
                     }
-                });
+                    if !xpaths_overlap(norm_a, norm_b) {
+                        continue;
+                    }
 
-                // Build condition string from either op's condition
-                let condition = op_a
-                    .condition
-                    .as_ref()
-                    .or(op_b.condition.as_ref())
-                    .map(|c| format!("requires mod: {}", c.required_mod));
+                    // Build the def target from the normalized xpaths
+                    let def_type = norm_a.def_type.clone().unwrap_or_default();
+                    let def_name = norm_a
+                        .def_name
+                        .clone()
+                        .or_else(|| norm_b.def_name.clone())
+                        .unwrap_or_default();
 
-                let wildcard = norm_a.def_name.is_none() || norm_b.def_name.is_none();
+                    // Determine winner by load order if available
+                    let winner = order.and_then(|lo| {
+                        let pos_a = lo.position(&mod_a.package_id);
+                        let pos_b = lo.position(&mod_b.package_id);
+                        match (pos_a, pos_b) {
+                            (Some(pa), Some(pb)) => {
+                                if pa > pb {
+                                    Some(mod_a.package_id.clone())
+                                } else {
+                                    Some(mod_b.package_id.clone())
+                                }
+                            }
+                            _ => None,
+                        }
+                    });
 
-                conflicts.push(Conflict::Def(DefConflict {
-                    target: DefTarget { def_type, def_name },
-                    mods: vec![(**mod_a).clone(), (**mod_b).clone()],
-                    mechanism: DefConflictMechanism::XPathOverlap {
-                        xpath_a: op_a.xpath.clone(),
-                        xpath_b: op_b.xpath.clone(),
-                        wildcard,
-                    },
-                    winner,
-                    condition,
-                }));
+                    // Build condition string from either op's condition
+                    let condition = op_a
+                        .condition
+                        .as_ref()
+                        .or(op_b.condition.as_ref())
+                        .map(|c| format!("requires mod: {}", c.required_mod));
+
+                    let wildcard = norm_a.def_name.is_none() || norm_b.def_name.is_none();
+
+                    bucket_conflicts.push(Conflict::Def(DefConflict {
+                        target: DefTarget { def_type, def_name },
+                        mods: vec![(**mod_a).clone(), (**mod_b).clone()],
+                        mechanism: DefConflictMechanism::XPathOverlap {
+                            xpath_a: op_a.xpath.clone(),
+                            xpath_b: op_b.xpath.clone(),
+                            wildcard,
+                        },
+                        winner,
+                        condition,
+                    }));
+                }
             }
-        }
+            bucket_conflicts
+        })
+        .collect();
+
+    for bucket in conflict_buckets {
+        conflicts.extend(bucket);
     }
 
     // 2. Check for patches targeting defs that are fully replaced by another mod
