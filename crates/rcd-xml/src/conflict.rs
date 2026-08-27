@@ -48,6 +48,10 @@ pub fn detect_xpath_conflicts(
     }
 
     // Deterministic output: process buckets in sorted def_type order.
+    // This locks the output order of the bucketed algorithm (def_type-grouped,
+    // sorted bucket keys, sequential i<j pair order within each bucket) — NOT
+    // the order of the pre-change flat pair loop, which interleaved pairs in
+    // flattened input order. Do not expect the old flat-loop order here.
     let mut bucket_keys: Vec<&str> = buckets.keys().copied().collect();
     bucket_keys.sort_unstable();
 
@@ -225,9 +229,93 @@ mod tests {
     }
 
     #[test]
+    fn empty_input_produces_no_conflicts() {
+        let conflicts = detect_xpath_conflicts(&[], &HashMap::new(), None);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn multi_bucket_output_follows_sorted_def_type_order() {
+        // Input order interleaves ThingDef ops before PawnKindDef ops, but
+        // sorted def_type keys put PawnKindDef first — the output must follow
+        // the sorted bucket order, not the flattened input order.
+        let xpath_t1 = r#"Defs/ThingDef[defName="Steel"]/statBases"#;
+        let xpath_t2 = r#"Defs/ThingDef[defName="Steel"]/statBases/MaxHitPoints"#;
+        let xpath_t3 = r#"Defs/ThingDef[defName="Steel"]/statBases/MarketValue"#;
+        let xpath_p1 = r#"Defs/PawnKindDef[defName="Wolf"]/statBases"#;
+        let xpath_p2 = r#"Defs/PawnKindDef[defName="Wolf"]/statBases/topSpeed"#;
+        let xpath_p3 = r#"Defs/PawnKindDef[defName="Wolf"]/statBases"#;
+
+        let op = |xpath: &str| ParsedPatchOp {
+            op_type: PatchOpType::Replace,
+            xpath: xpath.to_string(),
+            source_file: "P.xml".to_string(),
+            condition: None,
+        };
+
+        let patches = vec![
+            (
+                test_mod_summary_named("mod.a", "Mod A"),
+                vec![op(xpath_t1), op(xpath_p1), op(xpath_t2)],
+            ),
+            (
+                test_mod_summary_named("mod.b", "Mod B"),
+                vec![op(xpath_t3), op(xpath_p2), op(xpath_p3)],
+            ),
+        ];
+
+        let conflicts = detect_xpath_conflicts(&patches, &HashMap::new(), None);
+        assert_eq!(conflicts.len(), 3);
+
+        // Expected order: PawnKindDef bucket first (sorted key order) with
+        // pairs in input i<j order, then the single ThingDef pair.
+        let expected = [
+            ("PawnKindDef", xpath_p1, xpath_p2),
+            ("PawnKindDef", xpath_p1, xpath_p3),
+            ("ThingDef", xpath_t1, xpath_t3),
+        ];
+        for (conflict, (def_type, xpath_a, xpath_b)) in conflicts.iter().zip(expected) {
+            match conflict {
+                Conflict::Def(dc) => {
+                    assert_eq!(dc.target.def_type, def_type);
+                    match &dc.mechanism {
+                        DefConflictMechanism::XPathOverlap {
+                            xpath_a: a,
+                            xpath_b: b,
+                            ..
+                        } => {
+                            assert_eq!(a, xpath_a);
+                            assert_eq!(b, xpath_b);
+                        }
+                        other => panic!("Expected XPathOverlap, got {:?}", other),
+                    }
+                    assert_eq!(
+                        dc.mods
+                            .iter()
+                            .map(|m| m.package_id.as_str())
+                            .collect::<Vec<_>>(),
+                        vec!["mod.a", "mod.b"]
+                    );
+                }
+                _ => panic!("Expected Conflict::Def"),
+            }
+        }
+    }
+
+    #[test]
     #[ignore]
     fn xpath_conflict_detection_large_scale_smoke() {
-        // 200 mods x 30 patches each, spread over 50 def types.
+        // 200 mods x 30 patches each. The def-type segment cycles across 5
+        // types (ThingDef/PawnKindDef/TerrainDef/ItemDef/RecipeDef) and the
+        // defName predicate varies over 50 values, so the workload actually
+        // spans multiple buckets and exercises bucketing + rayon.
+        const DEF_TYPES: [&str; 5] = [
+            "ThingDef",
+            "PawnKindDef",
+            "TerrainDef",
+            "ItemDef",
+            "RecipeDef",
+        ];
         let mut patches = Vec::new();
         for m in 0..200 {
             let ms = test_mod_summary_named(&format!("mod.{m}"), &format!("Mod {m}"));
@@ -235,7 +323,8 @@ mod tests {
                 .map(|i| ParsedPatchOp {
                     op_type: PatchOpType::Replace,
                     xpath: format!(
-                        "Defs/ThingDef[defName=\"Item_{}_{}\"]/statBases",
+                        "Defs/{}[defName=\"Item_{}_{}\"]/statBases",
+                        DEF_TYPES[i % DEF_TYPES.len()],
                         i % 50,
                         i
                     ),
