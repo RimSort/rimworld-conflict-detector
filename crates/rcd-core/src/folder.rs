@@ -94,7 +94,23 @@ pub fn discover_mods(
             continue;
         };
 
-        for entry in entries.flatten() {
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    diagnostics.push(crate::Diagnostic {
+                        affected_mod: None,
+                        severity: crate::Severity::Warning,
+                        message: format!(
+                            "Failed to read directory entry in {}: {}",
+                            search_dir.display(),
+                            e
+                        ),
+                        source: crate::DiagnosticSource::FolderResolution,
+                    });
+                    continue;
+                }
+            };
             let path = entry.path();
             if !path.is_dir() {
                 continue;

@@ -155,6 +155,12 @@ fn run_list_mods(
         rimworld_path.as_deref(),
     );
 
+    // Surface discovery diagnostics (e.g. unparseable About.xml) — they
+    // explain why mods may be missing, including when none were found.
+    for d in &resolved.diagnostics {
+        eprintln!("[{}] {}", d.severity, d.message);
+    }
+
     if resolved.mods.is_empty() {
         eprintln!("No mods found.");
         return 2;
