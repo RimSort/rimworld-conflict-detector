@@ -129,6 +129,14 @@ fn normalize_whitespace(s: &str) -> String {
                     result.push_str(&trimmed);
                 }
             }
+            Ok(Event::CData(ref c)) => {
+                // CDATA content is already decoded; canonicalize it like Text
+                // so CDATA-only divergences are visible to the comparison
+                // (def_parser re-emits CDATA verbatim into raw_xml).
+                let content = String::from_utf8_lossy(c.as_ref());
+                let trimmed: String = content.split_whitespace().collect::<Vec<_>>().join(" ");
+                result.push_str(&trimmed);
+            }
             Ok(Event::Empty(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 let attrs = build_attrs_string(e);
@@ -275,6 +283,11 @@ fn extract_tag_content(
                     captured.push_str(&text);
                 }
             }
+            Ok(Event::CData(ref c)) => {
+                if capture_depth.is_some() {
+                    captured.push_str(&String::from_utf8_lossy(c.as_ref()));
+                }
+            }
             Ok(Event::End(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if capture_depth == Some(depth) && tag == target_tag {
@@ -330,9 +343,11 @@ mod tests {
             mod_summary: test_mod_summary_named("test.mod.b", "Mod B"),
             defs: mod_a.defs.clone(),
         };
-        // DISTINCT package ids so the comparison path actually runs (same-id
-        // pairs short-circuit before any parsing, making errors.is_empty()
-        // vacuous); identical XML keeps all_identical suppressing the conflict.
+        // DISTINCT package ids here only dodge the same-package short-circuit;
+        // the identical XML then hits all_identical, which also continues before
+        // find_divergent_fields — so this sub-case can never populate errors.
+        // It pins "well-formed input stays quiet"; the c/d pair below is what
+        // actually exercises the error-capable path (FR-2c gate M5 correction).
         let (conflicts, errors) = detect_replacements(&[mod_a, mod_b], None);
         assert!(conflicts.is_empty());
         assert!(
@@ -371,6 +386,43 @@ mod tests {
             conflicts.len(),
             1,
             "genuinely divergent defs still conflict"
+        );
+    }
+
+    #[test]
+    fn cdata_only_divergence_is_detected_not_suppressed() {
+        // Regression (FR-2c gate I-2): without a CData arm in
+        // normalize_whitespace/extract_tag_content, labels differing only
+        // inside CDATA canonicalized equal and all_identical suppressed the
+        // conflict. raw_xml below is what def_parser emits after FR-2c.
+        let mod_a = ModDefs {
+            mod_summary: test_mod_summary_named("test.mod.a", "Mod A"),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".to_string(),
+                def_name: "Steel".to_string(),
+                raw_xml:
+                    "<ThingDef><defName>Steel</defName><label><![CDATA[A]]></label></ThingDef>"
+                        .to_string(),
+                source_file: "a.xml".to_string(),
+            }],
+        };
+        let mod_b = ModDefs {
+            mod_summary: test_mod_summary_named("test.mod.b", "Mod B"),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".to_string(),
+                def_name: "Steel".to_string(),
+                raw_xml:
+                    "<ThingDef><defName>Steel</defName><label><![CDATA[B]]></label></ThingDef>"
+                        .to_string(),
+                source_file: "b.xml".to_string(),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(&[mod_a, mod_b], None);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "CDATA-only divergence must surface as a conflict"
         );
     }
 

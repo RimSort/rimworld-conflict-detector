@@ -172,29 +172,53 @@ fn parse_single_def(
                 let attrs = build_attrs_string(e);
                 inner_xml.push_str(&format!("<{tag}{attrs}>"));
 
-                // If this is a direct child `defName`, read its text
+                // If this is a direct child `defName`, accumulate until its
+                // End: raw (escaped) bytes go to inner_xml, decoded text to the
+                // identity. Consuming the End here — instead of the old
+                // one-shot reads — is what keeps CDATA defNames resolving and
+                // empty <defName></defName> from swallowing the next sibling.
                 if depth == 2 && tag == "defName" {
-                    let mut text_buf = Vec::new();
-                    if let Ok(Event::Text(t)) = reader.read_event_into(&mut text_buf) {
-                        // raw_xml keeps the escaped source bytes; only the
-                        // identity value is unescaped. Writing decoded text
-                        // back would turn a valid `a &lt; b` into malformed
-                        // `a < b` for the re-parse in replacement.rs.
-                        inner_xml.push_str(&String::from_utf8_lossy(t.as_ref()));
-                        match t.unescape() {
-                            // trim() decouples identity from the reader's
-                            // trim_text config (matches patch_ops convention).
-                            Ok(name) => def_name = Some(name.trim().to_string()),
-                            // An undecodable defName drops the def (identity is
-                            // unknown) — say so instead of vanishing silently.
-                            Err(e) => errors
-                                .push(format!("defName in {} could not be decoded: {}", source, e)),
+                    let mut raw = String::new();
+                    let mut decoded = String::new();
+                    loop {
+                        let mut inner_buf = Vec::new();
+                        match reader.read_event_into(&mut inner_buf) {
+                            Ok(Event::Text(ref t)) => {
+                                raw.push_str(&String::from_utf8_lossy(t.as_ref()));
+                                // trim() decouples identity from the reader's
+                                // trim_text config (matches patch_ops convention).
+                                match t.unescape() {
+                                    Ok(name) => decoded.push_str(&name),
+                                    // An undecodable defName drops the def
+                                    // (identity is unknown) — say so instead
+                                    // of vanishing silently.
+                                    Err(e) => errors.push(format!(
+                                        "defName in {} could not be decoded: {}",
+                                        source, e
+                                    )),
+                                }
+                            }
+                            Ok(Event::CData(ref c)) => {
+                                let content = String::from_utf8_lossy(c.as_ref());
+                                raw.push_str(&format!("<![CDATA[{}]]>", content));
+                                decoded.push_str(&content);
+                            }
+                            Ok(Event::End(_)) => {
+                                inner_xml.push_str(&raw);
+                                inner_xml.push_str(&format!("</{tag}>"));
+                                let trimmed = decoded.trim();
+                                if !trimmed.is_empty() {
+                                    def_name = Some(trimmed.to_string());
+                                }
+                                break;
+                            }
+                            // Unclosed defName: leave def_name unset so the
+                            // def is dropped; the pre-check/outer loop owns
+                            // the diagnostic.
+                            Ok(Event::Eof) | Err(_) => break,
+                            _ => {}
                         }
-                    }
-                    // Read the closing </defName>
-                    let mut end_buf = Vec::new();
-                    if let Ok(Event::End(_)) = reader.read_event_into(&mut end_buf) {
-                        inner_xml.push_str(&format!("</{tag}>"));
+                        inner_buf.clear();
                     }
                     depth -= 1;
                 }
@@ -259,7 +283,10 @@ pub(crate) fn build_attrs_string(e: &quick_xml::events::BytesStart<'_>) -> Strin
     let mut attrs = String::new();
     for attr in e.attributes().filter_map(|a| a.ok()) {
         let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
-        let val = String::from_utf8_lossy(&attr.value).to_string();
+        // Raw (still-escaped) source bytes; a literal `"` in them can only
+        // mean the source used single quotes, so escaping it here is always
+        // correct for the double-quoted re-emission.
+        let val = String::from_utf8_lossy(&attr.value).replace('"', "&quot;");
         attrs.push_str(&format!(r#" {key}="{val}""#));
     }
     attrs
@@ -514,6 +541,59 @@ mod tests {
         assert!(
             defs[0].raw_xml.contains("<![CDATA[a < b]]>"),
             "raw_xml must carry CDATA verbatim: {}",
+            defs[0].raw_xml
+        );
+        assert_eq!(
+            defs[0].raw_xml.matches("<![CDATA[").count(),
+            1,
+            "must re-wrap once, not double-wrap: {}",
+            defs[0].raw_xml
+        );
+    }
+
+    #[test]
+    fn cdata_defname_resolves_and_survives_reconstruction() {
+        let xml = r#"<Defs><ThingDef><defName><![CDATA[Steel]]></defName><label>x</label></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].def_name, "Steel");
+        assert!(
+            defs[0]
+                .raw_xml
+                .contains("<defName><![CDATA[Steel]]></defName>"),
+            "{}",
+            defs[0].raw_xml
+        );
+    }
+
+    #[test]
+    fn empty_defname_does_not_swallow_following_sibling() {
+        // P0 regression: the old one-shot End read consumed the NEXT Start event,
+        // losing every def after an empty <defName></defName>.
+        let xml = r#"<Defs>
+    <ThingDef><defName></defName><label>ghost</label></ThingDef>
+    <ThingDef><defName>Real</defName><label>x</label></ThingDef>
+</Defs>"#;
+        let (defs, _s, _errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(
+            defs.iter().any(|d| d.def_name == "Real"),
+            "def after empty defName must survive: {:?}",
+            defs.iter().map(|d| &d.def_name).collect::<Vec<_>>()
+        );
+        assert!(!defs.iter().any(|d| d.def_name.is_empty()));
+    }
+
+    #[test]
+    fn single_quoted_attr_with_embedded_quote_is_requoted_safely() {
+        // Source Name='a "b"' → raw bytes contain a literal quote; re-emitting
+        // into double quotes without escaping produces malformed XML.
+        let xml = r#"<Defs><ThingDef><defName>Steel</defName><costList><li Name='a "b"'>x</li></costList></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            defs[0].raw_xml.contains(r#"Name="a &quot;b&quot;"#),
+            "embedded quotes must be escaped on re-quote: {}",
             defs[0].raw_xml
         );
     }
