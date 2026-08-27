@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use rcd_core::{Conflict, DefConflict, DefConflictMechanism, DefTarget, LoadOrder, ModSummary};
 
 use crate::patch_ops::ParsedPatchOp;
-use crate::xpath::{normalize_xpath, xpaths_overlap};
+use crate::xpath::{normalize_xpath, xpaths_overlap, NormalizedXPath};
 
 /// Detect XPath-related conflicts across all mods' patch operations.
 ///
@@ -30,27 +30,43 @@ pub fn detect_xpath_conflicts(
         .flat_map(|(ms, ops)| ops.iter().map(move |op| (ms, op)))
         .collect();
 
-    // 1. Check for XPath overlaps between patches from different mods
-    for i in 0..all_ops.len() {
-        for j in (i + 1)..all_ops.len() {
-            let (mod_a, op_a) = &all_ops[i];
-            let (mod_b, op_b) = &all_ops[j];
+    // 1. Check for XPath overlaps between patches from different mods.
+    //    Normalize every op once, then bucket by def_type: xpaths_overlap
+    //    requires equal Some def_types, so only ops in the same bucket can
+    //    conflict; ops with no def_type can't conflict at all.
+    let normalized: Vec<(&ModSummary, &ParsedPatchOp, NormalizedXPath)> = all_ops
+        .iter()
+        .map(|(ms, op)| (*ms, *op, normalize_xpath(&op.xpath)))
+        .collect();
 
-            // Only flag conflicts between different mods
-            if mod_a.package_id == mod_b.package_id {
-                continue;
-            }
+    let mut buckets: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, (_, _, norm)) in normalized.iter().enumerate() {
+        if let Some(dt) = norm.def_type.as_deref() {
+            buckets.entry(dt).or_default().push(i);
+        }
+    }
 
-            let norm_a = normalize_xpath(&op_a.xpath);
-            let norm_b = normalize_xpath(&op_b.xpath);
+    // Deterministic output: process buckets in sorted def_type order.
+    let mut bucket_keys: Vec<&str> = buckets.keys().copied().collect();
+    bucket_keys.sort_unstable();
 
-            if xpaths_overlap(&norm_a, &norm_b) {
-                // Build the def target from whichever normalized xpath has the info
-                let def_type = norm_a
-                    .def_type
-                    .clone()
-                    .or_else(|| norm_b.def_type.clone())
-                    .unwrap_or_default();
+    for key in bucket_keys {
+        let indices = &buckets[key];
+        for ai in 0..indices.len() {
+            for bi in (ai + 1)..indices.len() {
+                let (mod_a, op_a, norm_a) = &normalized[indices[ai]];
+                let (mod_b, op_b, norm_b) = &normalized[indices[bi]];
+
+                // Only flag conflicts between different mods
+                if mod_a.package_id == mod_b.package_id {
+                    continue;
+                }
+                if !xpaths_overlap(norm_a, norm_b) {
+                    continue;
+                }
+
+                // Build the def target from the normalized xpaths
+                let def_type = norm_a.def_type.clone().unwrap_or_default();
                 let def_name = norm_a
                     .def_name
                     .clone()
@@ -84,7 +100,7 @@ pub fn detect_xpath_conflicts(
 
                 conflicts.push(Conflict::Def(DefConflict {
                     target: DefTarget { def_type, def_name },
-                    mods: vec![(*mod_a).clone(), (*mod_b).clone()],
+                    mods: vec![(**mod_a).clone(), (**mod_b).clone()],
                     mechanism: DefConflictMechanism::XPathOverlap {
                         xpath_a: op_a.xpath.clone(),
                         xpath_b: op_b.xpath.clone(),
@@ -140,6 +156,88 @@ mod tests {
     use super::*;
     use crate::patch_ops::{PatchCondition, PatchOpType};
     use rcd_core::testutil::test_mod_summary_named;
+
+    #[test]
+    fn ops_without_def_type_never_conflict() {
+        // XPaths that normalize to def_type = None can't overlap anything.
+        let patches = vec![
+            (
+                test_mod_summary_named("mod.a", "Mod A"),
+                vec![ParsedPatchOp {
+                    op_type: PatchOpType::Replace,
+                    xpath: "Defs/statBases".to_string(), // no *Def segment → def_type None
+                    source_file: "mod_a/Patches/P.xml".to_string(),
+                    condition: None,
+                }],
+            ),
+            (
+                test_mod_summary_named("mod.b", "Mod B"),
+                vec![ParsedPatchOp {
+                    op_type: PatchOpType::Replace,
+                    xpath: "Defs/ThingDef/statBases".to_string(),
+                    source_file: "mod_b/Patches/P.xml".to_string(),
+                    condition: None,
+                }],
+            ),
+        ];
+        let conflicts = detect_xpath_conflicts(&patches, &HashMap::new(), None);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    fn different_def_types_never_conflict_even_with_same_field() {
+        let patches = vec![
+            (
+                test_mod_summary_named("mod.a", "Mod A"),
+                vec![ParsedPatchOp {
+                    op_type: PatchOpType::Replace,
+                    xpath: "Defs/ThingDef/statBases".to_string(),
+                    source_file: "mod_a/Patches/P.xml".to_string(),
+                    condition: None,
+                }],
+            ),
+            (
+                test_mod_summary_named("mod.b", "Mod B"),
+                vec![ParsedPatchOp {
+                    op_type: PatchOpType::Replace,
+                    xpath: "Defs/PawnKindDef/statBases".to_string(),
+                    source_file: "mod_b/Patches/P.xml".to_string(),
+                    condition: None,
+                }],
+            ),
+        ];
+        let conflicts = detect_xpath_conflicts(&patches, &HashMap::new(), None);
+        assert!(conflicts.is_empty());
+    }
+
+    #[test]
+    #[ignore]
+    fn xpath_conflict_detection_large_scale_smoke() {
+        // 200 mods x 30 patches each, spread over 50 def types.
+        let mut patches = Vec::new();
+        for m in 0..200 {
+            let ms = test_mod_summary_named(&format!("mod.{m}"), &format!("Mod {m}"));
+            let ops: Vec<_> = (0..30)
+                .map(|i| ParsedPatchOp {
+                    op_type: PatchOpType::Replace,
+                    xpath: format!(
+                        "Defs/ThingDef[defName=\"Item_{}_{}\"]/statBases",
+                        i % 50,
+                        i
+                    ),
+                    source_file: format!("mod.{m}/Patches/P.xml"),
+                    condition: None,
+                })
+                .collect();
+            patches.push((ms, ops));
+        }
+
+        let start = std::time::Instant::now();
+        let conflicts = detect_xpath_conflicts(&patches, &HashMap::new(), None);
+        let elapsed = start.elapsed();
+        eprintln!("6000 ops -> {} conflicts in {:?}", conflicts.len(), elapsed);
+        assert!(elapsed.as_secs() < 5, "regression: took {:?}", elapsed);
+    }
 
     #[test]
     fn xpath_overlap_produces_warning() {
