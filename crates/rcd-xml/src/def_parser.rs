@@ -58,6 +58,29 @@ pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, Vec<String>) {
     (defs, total_skipped, errors)
 }
 
+/// One-event-per-line scan that guarantees a diagnostic for any malformed
+/// document, even when structural parsing swallows the error in a best-effort
+/// nested read (quick-xml can latch after Err, hiding it from outer loops).
+/// Returns Some(message) when the document is not well-formed.
+pub(crate) fn check_well_formed(xml: &str, source: &str) -> Option<String> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Eof) => return None,
+            Ok(_) => {}
+            Err(e) => {
+                return Some(format!(
+                    "XML parse error in {}: {} (document not well-formed; results may be incomplete)",
+                    source, e
+                ));
+            }
+        }
+        buf.clear();
+    }
+}
+
 /// Parses XML content for defs. Finds top-level elements under `<Defs>` whose tag names
 /// end with "Def" (e.g., `ThingDef`, `RecipeDef`). Extracts the `defName` child and
 /// captures the raw XML of the entire def element.
@@ -69,6 +92,9 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, V
     let mut defs = Vec::new();
     let mut abstract_skipped: usize = 0;
     let mut errors: Vec<String> = Vec::new();
+    if let Some(msg) = check_well_formed(xml, source) {
+        errors.push(msg);
+    }
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
@@ -405,5 +431,15 @@ mod tests {
         assert!(defs.iter().any(|d| d.def_name == "Good"), "valid def before the error should be kept");
         assert!(!errors.is_empty(), "parse error must be reported");
         assert!(errors.iter().all(|e| e.contains("test.xml")));
+    }
+
+    #[test]
+    fn unclosed_cdata_yields_diagnostic_via_precheck() {
+        // quick-xml latches on this error inside nested best-effort reads, so the
+        // structural parser alone reports nothing; the pre-check must catch it.
+        let xml = r#"<Defs><ThingDef><defName><![CDATA[Steel</defName><label>x</label></ThingDef></Defs>"#;
+        let (_defs, _skipped, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(!errors.is_empty(), "pre-check must surface the malformed document");
+        assert!(errors.iter().all(|e| e.contains("t.xml")));
     }
 }

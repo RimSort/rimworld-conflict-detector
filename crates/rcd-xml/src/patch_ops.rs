@@ -11,6 +11,8 @@ use quick_xml::reader::Reader;
 use std::path::Path;
 use walkdir::WalkDir;
 
+use crate::def_parser::check_well_formed;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchOpType {
     Replace,
@@ -80,6 +82,9 @@ pub fn parse_patches_dir(dir: &Path) -> (Vec<ParsedPatchOp>, Vec<String>) {
 pub fn parse_patches_from_xml(xml: &str, source: &str) -> (Vec<ParsedPatchOp>, Vec<String>) {
     let mut ops = Vec::new();
     let mut errors: Vec<String> = Vec::new();
+    if let Some(msg) = check_well_formed(xml, source) {
+        errors.push(msg);
+    }
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
@@ -769,5 +774,13 @@ mod tests {
         assert!(ops.iter().any(|o| o.xpath.contains("Steel")), "valid op before the error should be kept");
         assert!(!errors.is_empty(), "parse error must be reported");
         assert!(errors.iter().all(|e| e.contains("test.xml")));
+    }
+
+    #[test]
+    fn unclosed_cdata_in_xpath_yields_diagnostic_via_precheck() {
+        let xml = r#"<Patch><Operation Class="PatchOperationReplace"><xpath><![CDATA[Defs/ThingDef</xpath><value><label>x</label></value></Operation></Patch>"#;
+        let (_ops, errors) = parse_patches_from_xml(xml, "t.xml");
+        assert!(!errors.is_empty(), "pre-check must surface the malformed document");
+        assert!(errors.iter().all(|e| e.contains("t.xml")));
     }
 }
