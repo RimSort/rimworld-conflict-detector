@@ -74,13 +74,13 @@
 
 ### Error Handling
 
-- [ ] **`discover_mods` silently swallows I/O and parse errors** — `crates/rcd-core/src/folder.rs:81,98`. Uses `let Ok(entries) = ... else { continue }` and `if let Ok(mut mod_data) = parse_about_xml(...)`. Callers can't distinguish "no mods found" from "all mods failed to parse." Should return `(Vec<Mod>, Vec<Diagnostic>)` consistent with `parse_defs_dir`/`parse_patches_dir`.
+- [x] **`discover_mods` silently swallows I/O and parse errors** — `crates/rcd-core/src/folder.rs:81,98`. Uses `let Ok(entries) = ... else { continue }` and `if let Ok(mut mod_data) = parse_about_xml(...)`. Callers can't distinguish "no mods found" from "all mods failed to parse." Should return `(Vec<Mod>, Vec<Diagnostic>)` consistent with `parse_defs_dir`/`parse_patches_dir`.
 
-- [ ] **FFI silently drops mods that fail to parse** — `crates/rcd-ffi/src/lib.rs:54`. Unlike the CLI which emits Error diagnostics for failed mods, the FFI boundary skips them with no visibility. Failed mods should be collected and included in `report.diagnostics`.
+- [x] **FFI silently drops mods that fail to parse** — `crates/rcd-ffi/src/lib.rs:54`. Unlike the CLI which emits Error diagnostics for failed mods, the FFI boundary skips them with no visibility. Failed mods should be collected and included in `report.diagnostics`.
 
-- [ ] **XML parse errors silently ignored in def/patch parsers** — `def_parser.rs:109,180` and `patch_ops.rs:113,204,246,289,332,372,407`. Use `Err(_) => break` to silently ignore XML parse errors, returning partial results. Malformed XML containing conflicting defs produces false negatives.
+- [x] **XML parse errors silently ignored in def/patch parsers** — `def_parser.rs:109,180` and `patch_ops.rs:113,204,246,289,332,372,407`. Use `Err(_) => break` to silently ignore XML parse errors, returning partial results. Malformed XML containing conflicting defs produces false negatives.
 
-- [ ] **Manual patch detection panics not reported as diagnostics** — `crates/rcd-harmony/src/lib.rs:94-110`. `catch_unwind` catches the panic but emits no diagnostic, unlike `parse_harmony_patches` (lines 60-82) which emits a Warning. Should use `match` instead of `if let Ok` to emit a diagnostic on `Err`.
+- [x] **Manual patch detection panics not reported as diagnostics** — `crates/rcd-harmony/src/lib.rs:94-110`. `catch_unwind` catches the panic but emits no diagnostic, unlike `parse_harmony_patches` (lines 60-82) which emits a Warning. Should use `match` instead of `if let Ok` to emit a diagnostic on `Err`.
 
 ### Performance
 
