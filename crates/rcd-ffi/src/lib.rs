@@ -50,10 +50,19 @@ pub unsafe extern "C" fn rcd_analyze(
 
         // Resolve mods
         let mut mods = Vec::new();
+        let mut pre_diagnostics: Vec<rcd_core::Diagnostic> = Vec::new();
         for path in &mod_paths {
-            if let Ok(mut m) = rcd_core::about_xml::parse_about_xml(path) {
-                rcd_core::folder::resolve_mod_folders(&mut m, game_version, None);
-                mods.push(m);
+            match rcd_core::about_xml::parse_about_xml(path) {
+                Ok(mut m) => {
+                    rcd_core::folder::resolve_mod_folders(&mut m, game_version, None);
+                    mods.push(m);
+                }
+                Err(e) => pre_diagnostics.push(rcd_core::Diagnostic {
+                    affected_mod: None,
+                    severity: rcd_core::Severity::Error,
+                    message: format!("Failed to parse mod at {}: {}", path.display(), e),
+                    source: rcd_core::DiagnosticSource::MetadataResolution,
+                }),
             }
         }
 
@@ -87,7 +96,9 @@ pub unsafe extern "C" fn rcd_analyze(
             mods_scanned: mods.iter().map(rcd_core::ModSummary::from).collect(),
         };
 
-        let report = engine.analyze(&mods, load_order.as_ref(), metadata, progress_fn.as_ref());
+        let mut report = engine.analyze(&mods, load_order.as_ref(), metadata, progress_fn.as_ref());
+        // Resolution failures must reach C# consumers, not just the CLI.
+        report.diagnostics.splice(0..0, pre_diagnostics);
 
         // Serialize report to JSON
         match serde_json::to_string(&report) {
@@ -127,7 +138,7 @@ fn error_json(msg: &str) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::CString;
+    use std::ffi::{CStr, CString};
 
     #[test]
     fn null_config_returns_error() {
@@ -173,5 +184,34 @@ mod tests {
         let ts = parsed["metadata"]["timestamp"].as_str().unwrap();
         assert!(!ts.is_empty(), "timestamp should not be empty");
         chrono::DateTime::parse_from_rfc3339(ts).expect("timestamp should be valid RFC 3339");
+    }
+
+    #[test]
+    fn rcd_analyze_reports_unparseable_mod_paths() {
+        let config = serde_json::json!({
+            "mod_paths": ["/nonexistent/mod/dir"],
+            "game_version": "1.5",
+            "ordered": false
+        });
+        let config_c = CString::new(config.to_string()).unwrap();
+
+        let ptr = unsafe { rcd_analyze(config_c.as_ptr(), None) };
+        assert!(!ptr.is_null());
+
+        let json = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_string();
+        unsafe { rcd_free(ptr) };
+
+        let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let diagnostics = report["diagnostics"]
+            .as_array()
+            .expect("report must have diagnostics");
+        assert!(
+            diagnostics.iter().any(|d| d["severity"] == "error"
+                && d["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("Failed to parse mod"))),
+            "parse failure must be visible to C# consumers: {}",
+            json
+        );
     }
 }
