@@ -147,7 +147,7 @@ impl Detector for HarmonyDetector {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn manual_scan_panic_emits_warning_diagnostic() {
+    fn analyze_with_no_assemblies_emits_no_diagnostics() {
         use crate::HarmonyDetector;
         use rcd_core::Detector;
 
@@ -169,7 +169,9 @@ mod tests {
             assemblies_paths: vec![],
         };
 
-        // No assemblies → no panics possible; this pins the non-panic contract.
+        // The panic arm of the manual-scan match is intentionally uncovered
+        // in-tree (no crash fixture by design); this test pins the non-panic
+        // contract only: no assemblies → no diagnostics.
         let (_conflicts, diagnostics) = HarmonyDetector.analyze(&[m], None);
         assert!(diagnostics.is_empty());
     }
