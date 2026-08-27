@@ -26,7 +26,7 @@
 
 - [x] **FFI timestamp empty** — `rcd_analyze` sets `timestamp: String::new()`. Should use a real ISO 8601 timestamp (add chrono as an rcd-ffi dependency or pass it through the config JSON).
 
-- [ ] **Phase 2 conflict detection not parallelized** — Spec calls for parallel pairwise comparison with rayon. Currently sequential. Low priority since it's fast on in-memory data.
+- [x] **Phase 2 conflict detection not parallelized** — Spec calls for parallel pairwise comparison with rayon. Currently sequential. Low priority since it's fast on in-memory data.
 
 - [x] **`error_json` incomplete JSON escaping** — Manually escapes quotes and newlines but misses backslashes and control characters. Replace with `serde_json::json!({"error": msg}).to_string()`.
 
@@ -84,9 +84,9 @@
 
 ### Performance
 
-- [ ] **O(n²) XPath conflict detection with redundant normalization** — `crates/rcd-xml/src/conflict.rs:34-45`. Nested loop compares every pair of patch operations + calls `normalize_xpath` inside the inner loop for each pair. For 739 mods × ~10 patches = ~27M comparisons. Should group patches by `(def_type, def_name)` and pre-normalize XPaths once, reducing to O(n·k) where k is avg patches per def.
+- [x] **O(n²) XPath conflict detection with redundant normalization** — `crates/rcd-xml/src/conflict.rs:34-45`. Nested loop compares every pair of patch operations + calls `normalize_xpath` inside the inner loop for each pair. For 739 mods × ~10 patches = ~27M comparisons. Should group patches by `(def_type, def_name)` and pre-normalize XPaths once, reducing to O(n·k) where k is avg patches per def.
 
-- [ ] **`LoadOrder::position` is O(n) linear scan in inner loops** — `crates/rcd-core/src/types.rs:48`. Called twice per overlapping pair in `detect_xpath_conflicts`, making winner determination O(n³) worst case. Should use `HashMap<String, usize>` for O(1) lookups.
+- [x] **`LoadOrder::position` is O(n) linear scan in inner loops** — `crates/rcd-core/src/types.rs:48`. Called twice per overlapping pair in `detect_xpath_conflicts`, making winner determination O(n³) worst case. Should use `HashMap<String, usize>` for O(1) lookups.
 
 ### Architecture / API
 
