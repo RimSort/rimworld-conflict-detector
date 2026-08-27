@@ -44,9 +44,10 @@ pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, Vec<String>) {
         match std::fs::read_to_string(path) {
             Ok(contents) => {
                 let source = path.to_string_lossy().to_string();
-                let (parsed, skipped) = parse_defs_from_xml(&contents, &source);
+                let (parsed, skipped, xml_errors) = parse_defs_from_xml(&contents, &source);
                 defs.extend(parsed);
                 total_skipped += skipped;
+                errors.extend(xml_errors);
             }
             Err(e) => {
                 errors.push(format!("Failed to read {}: {}", path.display(), e));
@@ -63,10 +64,11 @@ pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, Vec<String>) {
 ///
 /// Abstract defs (those with `Abstract="True"`) that lack a `defName` are skipped.
 ///
-/// Returns a tuple of (parsed defs, count of abstract defs without defName that were skipped).
-pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize) {
+/// Returns a tuple of (parsed defs, count of abstract defs without defName that were skipped, parse errors).
+pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, Vec<String>) {
     let mut defs = Vec::new();
     let mut abstract_skipped: usize = 0;
+    let mut errors: Vec<String> = Vec::new();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
@@ -92,7 +94,7 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize) {
                     });
 
                     // Collect the entire def element's inner content
-                    match parse_single_def(&mut reader, &tag_name, is_abstract, source) {
+                    match parse_single_def(&mut reader, &tag_name, is_abstract, source, &mut errors) {
                         Some(parsed) => defs.push(parsed),
                         None if is_abstract => abstract_skipped += 1,
                         None => {}
@@ -106,13 +108,16 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize) {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!("XML parse error in {}: {}", source, e));
+                break;
+            }
             _ => {}
         }
         buf.clear();
     }
 
-    (defs, abstract_skipped)
+    (defs, abstract_skipped, errors)
 }
 
 /// Parses a single def element that we've already seen the opening tag for.
@@ -123,6 +128,7 @@ fn parse_single_def(
     def_type: &str,
     is_abstract: bool,
     source: &str,
+    errors: &mut Vec<String>,
 ) -> Option<ParsedDef> {
     let mut def_name: Option<String> = None;
     let mut depth: u32 = 1;
@@ -177,7 +183,10 @@ fn parse_single_def(
                 inner_xml.push_str(&format!("<{tag}{attrs}/>"));
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!("XML parse error in {}: {}", source, e));
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -236,7 +245,8 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let (defs, _) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _, errors) = parse_defs_from_xml(xml, "test.xml");
+        assert!(errors.is_empty());
         assert_eq!(defs.len(), 2);
 
         assert_eq!(defs[0].def_type, "ThingDef");
@@ -270,7 +280,7 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let (defs, _) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _, _) = parse_defs_from_xml(xml, "test.xml");
         // Abstract without defName is skipped; abstract WITH defName is kept;
         // non-abstract with defName is kept.
         assert_eq!(defs.len(), 2);
@@ -292,7 +302,7 @@ mod tests {
     </RecipeDef>
 </Defs>"#;
 
-        let (defs, _) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _, _) = parse_defs_from_xml(xml, "test.xml");
         assert_eq!(defs.len(), 2);
 
         assert_eq!(defs[0].def_type, "ThingDef");
@@ -335,7 +345,7 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let (defs, _) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _, _) = parse_defs_from_xml(xml, "test.xml");
         // "SomeRandomElement" doesn't end with "Def", so it should be skipped
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].def_name, "Steel");
@@ -360,7 +370,7 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let (defs, skipped) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, skipped, _) = parse_defs_from_xml(xml, "test.xml");
         assert_eq!(defs.len(), 2, "Steel + HasName");
         assert_eq!(skipped, 2, "Two abstract defs without defName were skipped");
     }
@@ -380,5 +390,20 @@ mod tests {
         assert_eq!(defs.len(), 1);
         assert_eq!(skipped, 0);
         assert!(errors.is_empty());
+    }
+
+    #[test]
+    fn malformed_defs_xml_reports_error_and_keeps_partial_results() {
+        // First def is valid; the second is truncated mid opening tag, which
+        // quick-xml reports as a syntax error ("tag not closed"). Truncation
+        // after text with well-formed tags would NOT error (non-validating Eof).
+        let xml = r#"<Defs>
+    <ThingDef><defName>Good</defName></ThingDef>
+    <ThingDef"#;
+
+        let (defs, _skipped, errors) = parse_defs_from_xml(xml, "test.xml");
+        assert!(defs.iter().any(|d| d.def_name == "Good"), "valid def before the error should be kept");
+        assert!(!errors.is_empty(), "parse error must be reported");
+        assert!(errors.iter().all(|e| e.contains("test.xml")));
     }
 }

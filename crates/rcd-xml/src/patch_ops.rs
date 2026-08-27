@@ -61,7 +61,9 @@ pub fn parse_patches_dir(dir: &Path) -> (Vec<ParsedPatchOp>, Vec<String>) {
         match std::fs::read_to_string(path) {
             Ok(contents) => {
                 let source = path.to_string_lossy().to_string();
-                ops.extend(parse_patches_from_xml(&contents, &source));
+                let (parsed_patches, xml_errors) = parse_patches_from_xml(&contents, &source);
+                ops.extend(parsed_patches);
+                errors.extend(xml_errors);
             }
             Err(e) => {
                 errors.push(format!("Failed to read {}: {}", path.display(), e));
@@ -75,8 +77,9 @@ pub fn parse_patches_dir(dir: &Path) -> (Vec<ParsedPatchOp>, Vec<String>) {
 /// Parse a single patches XML file and extract all patch operations.
 ///
 /// Handles top-level `<Patch>` containing `<Operation Class="...">` elements.
-pub fn parse_patches_from_xml(xml: &str, source: &str) -> Vec<ParsedPatchOp> {
+pub fn parse_patches_from_xml(xml: &str, source: &str) -> (Vec<ParsedPatchOp>, Vec<String>) {
     let mut ops = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
 
@@ -96,10 +99,10 @@ pub fn parse_patches_from_xml(xml: &str, source: &str) -> Vec<ParsedPatchOp> {
                 if inside_patch && tag == "Operation" {
                     let class = extract_class_attr(e);
                     if let Some(class) = class {
-                        parse_operation(&mut reader, &class, source, None, &mut ops);
+                        parse_operation(&mut reader, &class, source, None, &mut ops, &mut errors);
                     } else {
                         // Skip unknown operation without Class
-                        skip_current_element_by_depth(&mut reader);
+                        skip_current_element_by_depth(&mut reader, source, &mut errors);
                     }
                 }
             }
@@ -110,13 +113,16 @@ pub fn parse_patches_from_xml(xml: &str, source: &str) -> Vec<ParsedPatchOp> {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!("XML parse error in {}: {}", source, e));
+                break;
+            }
             _ => {}
         }
         buf.clear();
     }
 
-    ops
+    (ops, errors)
 }
 
 /// Parse a single `<Operation>` (or `<match>`) element given its Class attribute.
@@ -127,6 +133,7 @@ fn parse_operation(
     source: &str,
     condition: Option<PatchCondition>,
     ops: &mut Vec<ParsedPatchOp>,
+    errors: &mut Vec<String>,
 ) {
     match class {
         "PatchOperationReplace"
@@ -140,7 +147,7 @@ fn parse_operation(
                 "PatchOperationInsert" => PatchOpType::Insert,
                 _ => unreachable!(),
             };
-            if let Some(xpath) = read_xpath_from_operation(reader) {
+            if let Some(xpath) = read_xpath_from_operation(reader, source, errors) {
                 ops.push(ParsedPatchOp {
                     op_type,
                     xpath,
@@ -150,18 +157,18 @@ fn parse_operation(
             }
         }
         "PatchOperationSequence" => {
-            parse_sequence(reader, source, condition, ops);
+            parse_sequence(reader, source, condition, ops, errors);
         }
         "PatchOperationFindMod" => {
-            parse_find_mod(reader, source, ops);
+            parse_find_mod(reader, source, ops, errors);
         }
         "PatchOperationConditional" => {
-            parse_conditional(reader, source, condition, ops);
+            parse_conditional(reader, source, condition, ops, errors);
         }
         _ => {
             // Unknown operation type — skip it. We don't know the enclosing
             // tag name, but we track depth to find the matching end tag.
-            skip_current_element_by_depth(reader);
+            skip_current_element_by_depth(reader, source, errors);
         }
     }
 }
@@ -169,7 +176,11 @@ fn parse_operation(
 /// Read the `<xpath>` child element value from within a simple patch operation
 /// (Replace, Add, Remove, Insert). Skips remaining children and consumes
 /// through the closing tag of the operation's enclosing element.
-fn read_xpath_from_operation(reader: &mut Reader<&[u8]>) -> Option<String> {
+fn read_xpath_from_operation(
+    reader: &mut Reader<&[u8]>,
+    source: &str,
+    errors: &mut Vec<String>,
+) -> Option<String> {
     let mut xpath: Option<String> = None;
     let mut depth: u32 = 1; // We're inside the Operation/match element
     let mut buf = Vec::new();
@@ -201,7 +212,10 @@ fn read_xpath_from_operation(reader: &mut Reader<&[u8]>) -> Option<String> {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!("XML parse error in {}: {}", source, e));
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -217,6 +231,7 @@ fn parse_sequence(
     source: &str,
     condition: Option<PatchCondition>,
     ops: &mut Vec<ParsedPatchOp>,
+    errors: &mut Vec<String>,
 ) {
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
@@ -231,7 +246,7 @@ fn parse_sequence(
                 if tag == "li"
                     && let Some(class) = extract_class_attr(e)
                 {
-                    parse_operation(reader, &class, source, condition.clone(), ops);
+                    parse_operation(reader, &class, source, condition.clone(), ops, errors);
                     // parse_operation consumed through the closing </li>, so adjust depth
                     depth -= 1;
                 }
@@ -243,7 +258,10 @@ fn parse_sequence(
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!("XML parse error in {}: {}", source, e));
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -252,7 +270,12 @@ fn parse_sequence(
 
 /// Parse `PatchOperationFindMod`: extract mod names from `<mods><li>` and
 /// parse `<match>` as a nested operation with the condition applied.
-fn parse_find_mod(reader: &mut Reader<&[u8]>, source: &str, ops: &mut Vec<ParsedPatchOp>) {
+fn parse_find_mod(
+    reader: &mut Reader<&[u8]>,
+    source: &str,
+    ops: &mut Vec<ParsedPatchOp>,
+    errors: &mut Vec<String>,
+) {
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
     let mut required_mods: Vec<String> = Vec::new();
@@ -265,7 +288,7 @@ fn parse_find_mod(reader: &mut Reader<&[u8]>, source: &str, ops: &mut Vec<Parsed
 
                 if tag == "mods" {
                     // Parse <mods><li>ModName</li></mods>
-                    required_mods = read_li_text_list(reader);
+                    required_mods = read_li_text_list(reader, source, errors);
                     depth -= 1; // read_li_text_list consumes through </mods>
                 } else if tag == "match" {
                     // <match Class="PatchOperationReplace">
@@ -274,7 +297,7 @@ fn parse_find_mod(reader: &mut Reader<&[u8]>, source: &str, ops: &mut Vec<Parsed
                         let condition = required_mods.first().map(|m| PatchCondition {
                             required_mod: m.clone(),
                         });
-                        parse_operation(reader, &class, source, condition, ops);
+                        parse_operation(reader, &class, source, condition, ops, errors);
                         depth -= 1; // parse_operation consumed through </match>
                     }
                 }
@@ -286,7 +309,10 @@ fn parse_find_mod(reader: &mut Reader<&[u8]>, source: &str, ops: &mut Vec<Parsed
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!("XML parse error in {}: {}", source, e));
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -301,6 +327,7 @@ fn parse_conditional(
     source: &str,
     condition: Option<PatchCondition>,
     ops: &mut Vec<ParsedPatchOp>,
+    errors: &mut Vec<String>,
 ) {
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
@@ -313,12 +340,12 @@ fn parse_conditional(
 
                 if depth == 2 && (tag == "match" || tag == "nomatch") {
                     if let Some(class) = extract_class_attr(e) {
-                        parse_operation(reader, &class, source, condition.clone(), ops);
+                        parse_operation(reader, &class, source, condition.clone(), ops, errors);
                         depth -= 1;
                     }
                 } else if depth == 2 && tag == "xpath" {
                     // Skip the test xpath — we don't evaluate it
-                    skip_current_element_by_depth(reader);
+                    skip_current_element_by_depth(reader, source, errors);
                     depth -= 1;
                 }
             }
@@ -329,7 +356,10 @@ fn parse_conditional(
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!("XML parse error in {}: {}", source, e));
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -338,7 +368,7 @@ fn parse_conditional(
 
 /// Read a list of `<li>text</li>` elements from the current element (e.g., `<mods>`).
 /// Consumes through the closing tag of the parent element.
-fn read_li_text_list(reader: &mut Reader<&[u8]>) -> Vec<String> {
+fn read_li_text_list(reader: &mut Reader<&[u8]>, source: &str, errors: &mut Vec<String>) -> Vec<String> {
     let mut items = Vec::new();
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
@@ -369,7 +399,10 @@ fn read_li_text_list(reader: &mut Reader<&[u8]>) -> Vec<String> {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!("XML parse error in {}: {}", source, e));
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -390,7 +423,11 @@ fn extract_class_attr(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
 }
 
 /// Skip the current element by tracking depth.
-fn skip_current_element_by_depth(reader: &mut Reader<&[u8]>) {
+fn skip_current_element_by_depth(
+    reader: &mut Reader<&[u8]>,
+    source: &str,
+    errors: &mut Vec<String>,
+) {
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
 
@@ -404,7 +441,10 @@ fn skip_current_element_by_depth(reader: &mut Reader<&[u8]>) {
                 }
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(e) => {
+                errors.push(format!("XML parse error in {}: {}", source, e));
+                break;
+            }
             _ => {}
         }
         buf.clear();
@@ -471,7 +511,8 @@ mod tests {
     </Operation>
 </Patch>"#;
 
-        let ops = parse_patches_from_xml(xml, "test.xml");
+        let (ops, errors) = parse_patches_from_xml(xml, "test.xml");
+        assert!(errors.is_empty());
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].op_type, PatchOpType::Replace);
         assert_eq!(
@@ -499,7 +540,7 @@ mod tests {
     </Operation>
 </Patch>"#;
 
-        let ops = parse_patches_from_xml(xml, "test.xml");
+        let (ops, _errors) = parse_patches_from_xml(xml, "test.xml");
         assert_eq!(ops.len(), 2);
         assert_eq!(ops[0].op_type, PatchOpType::Replace);
         assert_eq!(ops[1].op_type, PatchOpType::Add);
@@ -520,7 +561,7 @@ mod tests {
     </Operation>
 </Patch>"#;
 
-        let ops = parse_patches_from_xml(xml, "test.xml");
+        let (ops, _errors) = parse_patches_from_xml(xml, "test.xml");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].op_type, PatchOpType::Replace);
         assert!(ops[0].condition.is_some());
@@ -543,7 +584,7 @@ mod tests {
     </Operation>
 </Patch>"#;
 
-        let ops = parse_patches_from_xml(xml, "test.xml");
+        let (ops, _errors) = parse_patches_from_xml(xml, "test.xml");
         assert_eq!(ops.len(), 2);
         assert_eq!(ops[0].op_type, PatchOpType::Remove);
         assert_eq!(ops[1].op_type, PatchOpType::Insert);
@@ -566,7 +607,7 @@ mod tests {
     </Operation>
 </Patch>"#;
 
-        let ops = parse_patches_from_xml(xml, "test.xml");
+        let (ops, _errors) = parse_patches_from_xml(xml, "test.xml");
         // Should skip the unknown PatchOperationTest and only pick up the Replace
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].op_type, PatchOpType::Replace);
@@ -586,7 +627,7 @@ mod tests {
     </Operation>
 </Patch>"#;
 
-        let ops = parse_patches_from_xml(xml, "test.xml");
+        let (ops, _errors) = parse_patches_from_xml(xml, "test.xml");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].op_type, PatchOpType::Add);
         assert_eq!(ops[0].xpath, r#"Defs/ThingDef[defName="Steel"]/comps"#);
@@ -606,7 +647,7 @@ mod tests {
     </Operation>
 </Patch>"#;
 
-        let ops = parse_patches_from_xml(xml, "test.xml");
+        let (ops, _errors) = parse_patches_from_xml(xml, "test.xml");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].op_type, PatchOpType::Add);
         assert_eq!(ops[0].xpath, r#"Defs/ThingDef[defName="Steel"]"#);
@@ -630,7 +671,7 @@ mod tests {
     </Operation>
 </Patch>"#;
 
-        let ops = parse_patches_from_xml(xml, "test.xml");
+        let (ops, _errors) = parse_patches_from_xml(xml, "test.xml");
         assert_eq!(
             ops.len(),
             2,
@@ -663,7 +704,7 @@ mod tests {
     </Operation>
 </Patch>"#;
 
-        let ops = parse_patches_from_xml(xml, "test.xml");
+        let (ops, _errors) = parse_patches_from_xml(xml, "test.xml");
         assert_eq!(
             ops.len(),
             2,
