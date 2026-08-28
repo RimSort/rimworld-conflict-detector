@@ -84,7 +84,13 @@ fn clean_scan_exits_0() {
     write_about(&dir.path().join("GoodMod"), VALID);
 
     let out = rcd()
-        .args(["scan", "--dir", dir.path().to_str().unwrap()])
+        .args([
+            "--format",
+            "json",
+            "scan",
+            "--dir",
+            dir.path().to_str().unwrap(),
+        ])
         .output()
         .unwrap();
 
@@ -95,6 +101,16 @@ fn clean_scan_exits_0() {
         stdout_string(&out),
         stderr_string(&out)
     );
+
+    // Pin the happy-path JSON shape too: one scanned mod, zero diagnostics.
+    // Without this, a stray diagnostic leak on the clean path stays green.
+    let report: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("clean scan must emit valid JSON");
+    assert_eq!(
+        report["metadata"]["mods_scanned"].as_array().unwrap().len(),
+        1
+    );
+    assert!(report["diagnostics"].as_array().unwrap().is_empty());
 }
 
 /// (c) A valid mod plus an explicitly-named broken path → the good mod is

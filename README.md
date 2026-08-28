@@ -43,7 +43,7 @@ Input (mutually exclusive):
 
 Output:
   --format <human|json>     Output format (default: human)
-  --severity <error|warning|info>  Minimum severity to display in human output (default: info; JSON always emits everything)
+  --severity <error|warning|info>  Minimum severity to display in human output (default: info; JSON always emits everything; the trailing `Summary:` diagnostic counts are always totals)
   --group-by <severity|mod> Grouping in human output (default: severity)
 
 Other:
@@ -58,7 +58,7 @@ Other:
 | 0    | Scan completed with no error-level conflicts and no error-level diagnostics |
 | 1    | Error-level conflicts detected |
 | 2    | No mods found AND resolution diagnostics present; also usage/fatal errors |
-| 3    | Scan completed with error-level diagnostics (e.g. an explicitly-named mod path failed to parse, or a load-order violation) |
+| 3    | Scan completed with error-level diagnostics (e.g. an explicitly-named mod path failed to parse, or a hard (forceLoad*) load-order violation) |
 
 Precedence: 2 beats 1 beats 3. An empty scan with **no** diagnostics exits 0
 (e.g. `--dir` pointing at an existing but empty directory). A typo'd or

@@ -14,7 +14,7 @@ pub struct ParsedDef {
 
 /// Recursively walks a directory, parses all `.xml` files, and returns all defs found.
 ///
-/// Returns a tuple of (parsed defs, count of abstract defs without defName that were skipped, I/O errors).
+/// Returns a tuple of (parsed defs, count of abstract defs without a usable defName that were skipped, I/O errors).
 pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, Vec<String>) {
     let mut defs = Vec::new();
     let mut total_skipped: usize = 0;
@@ -104,7 +104,7 @@ pub(crate) fn check_well_formed(xml: &str, source: &str) -> Option<String> {
 /// drop is diagnosed in the returned errors (a poisoned ABSTRACT def also
 /// surfaces in `abstract_skipped`, whose count conflates the two causes).
 ///
-/// Returns a tuple of (parsed defs, count of abstract defs without defName that were skipped, parse errors).
+/// Returns a tuple of (parsed defs, count of abstract defs without a usable defName that were skipped, parse errors).
 pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, Vec<String>) {
     let mut defs = Vec::new();
     let mut abstract_skipped: usize = 0;
