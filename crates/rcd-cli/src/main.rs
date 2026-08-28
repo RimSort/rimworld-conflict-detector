@@ -89,14 +89,6 @@ fn run_scan(
         rimworld_path.as_deref(),
     );
 
-    if resolved.mods.is_empty() && !resolved.diagnostics.is_empty() {
-        // All mods failed to resolve
-        for d in &resolved.diagnostics {
-            eprintln!("[{}] {}", d.severity, d.message);
-        }
-        return 2;
-    }
-
     // Set up detection engine
     let mut engine = Engine::new();
     engine.add_detector(Box::new(rcd_xml::XmlDetector));
@@ -115,8 +107,9 @@ fn run_scan(
 
     let mut report = engine.analyze(&resolved.mods, resolved.load_order.as_ref(), metadata, None);
 
-    // Merge resolution diagnostics
-    report.diagnostics.extend(resolved.diagnostics);
+    // Merge resolution diagnostics FIRST so they precede detector output,
+    // matching the FFI boundary's splice ordering.
+    report.diagnostics.splice(0..0, resolved.diagnostics);
 
     // Output based on format
     let min_severity = match severity_filter {
@@ -137,7 +130,15 @@ fn run_scan(
         }
     }
 
-    if report.has_errors() { 1 } else { 0 }
+    if report.metadata.mods_scanned.is_empty() && !report.diagnostics.is_empty() {
+        2 // total resolution failure — machine-readable diagnostics already on stdout
+    } else if report.has_errors() {
+        1
+    } else if report.has_error_diagnostics() {
+        3
+    } else {
+        0
+    }
 }
 
 fn run_list_mods(

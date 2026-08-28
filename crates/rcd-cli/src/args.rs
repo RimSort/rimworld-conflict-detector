@@ -2,7 +2,11 @@ use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "rcd", about = "RimWorld Conflict Detector")]
+#[command(
+    name = "rcd",
+    about = "RimWorld Conflict Detector",
+    after_help = "Exit codes: 0 clean, 1 conflicts at Error severity, 2 no mods found / usage, 3 scan completed with Error-severity diagnostics (partial results)."
+)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Commands,

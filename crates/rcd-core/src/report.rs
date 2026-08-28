@@ -79,6 +79,14 @@ impl Report {
         self.summary.conflicts_by_severity.error > 0
     }
 
+    /// True if any diagnostic is Error-severity (resolution/parse failures),
+    /// independent of conflict severities. Drives CLI exit code 3.
+    pub fn has_error_diagnostics(&self) -> bool {
+        self.diagnostics
+            .iter()
+            .any(|d| d.severity == Severity::Error)
+    }
+
     pub fn conflicts_at_or_above(&self, min_severity: Severity) -> Vec<&Conflict> {
         self.conflicts
             .iter()
@@ -137,6 +145,30 @@ mod tests {
         assert_eq!(report.summary.conflicts_by_severity.error, 1);
         assert_eq!(report.summary.conflicts_by_severity.warning, 1);
         assert!(report.has_errors());
+    }
+
+    #[test]
+    fn has_error_diagnostics_ignores_warnings_and_conflicts() {
+        let diag = |sev: crate::Severity| crate::Diagnostic {
+            affected_mod: None,
+            severity: sev,
+            message: "m".into(),
+            source: crate::DiagnosticSource::MetadataResolution,
+        };
+        let meta = || ReportMetadata {
+            timestamp: "t".into(),
+            game_version: None,
+            order_aware: false,
+            mods_scanned: vec![],
+        };
+        let r = Report::build(
+            meta(),
+            vec![],
+            vec![diag(crate::Severity::Warning), diag(crate::Severity::Info)],
+        );
+        assert!(!r.has_error_diagnostics());
+        let r = Report::build(meta(), vec![], vec![diag(crate::Severity::Error)]);
+        assert!(r.has_error_diagnostics());
     }
 
     #[test]

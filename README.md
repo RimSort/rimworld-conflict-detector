@@ -55,9 +55,10 @@ Other:
 
 | Code | Meaning |
 |------|---------|
-| 0    | No error-level conflicts found |
+| 0    | Scan completed with no error-level conflicts and no error-level diagnostics |
 | 1    | Error-level conflicts detected |
 | 2    | Fatal error (no mods found, invalid arguments) |
+| 3    | Scan completed with error-level diagnostics (partial results, e.g. a mod failed to parse) |
 
 ## Building
 
