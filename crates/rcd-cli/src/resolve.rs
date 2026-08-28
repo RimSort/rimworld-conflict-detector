@@ -115,7 +115,7 @@ pub fn resolve_from_config(
                 affected_mod: Some(package_id.clone()),
                 severity: Severity::Warning,
                 message: format!(
-                    "Mod '{}' not found in search directories (a mod folder may have failed to parse — see FolderResolution diagnostics)",
+                    "Mod '{}' not found in search directories (a mod folder may have failed to parse — see \"Failed to parse mod at\" diagnostics in this report)",
                     package_id
                 ),
                 source: DiagnosticSource::MetadataResolution,
@@ -164,6 +164,78 @@ fn find_steam_workshop(rimworld_path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_from_dir_surfaces_broken_mod_alongside_good_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("GoodMod/About");
+        std::fs::create_dir_all(&good).unwrap();
+        std::fs::write(
+            good.join("About.xml"),
+            "<ModMetaData><packageId>test.good</packageId><name>Good</name><author>a</author><supportedVersions><li>1.5</li></supportedVersions></ModMetaData>",
+        )
+        .unwrap();
+        let broken = dir.path().join("BrokenMod/About");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join("About.xml"), "<ModMetaData><unclosed>").unwrap();
+
+        let resolved = resolve_from_dir(dir.path(), Some("1.5"));
+        assert_eq!(resolved.mods.len(), 1);
+        assert_eq!(resolved.mods[0].package_id, "test.good");
+        assert_eq!(resolved.diagnostics.len(), 1);
+        assert_eq!(
+            resolved.diagnostics[0].source,
+            rcd_core::DiagnosticSource::FolderResolution
+        );
+        assert!(
+            resolved.diagnostics[0]
+                .message
+                .contains("Failed to parse mod at")
+        );
+    }
+
+    #[test]
+    fn resolve_from_config_broken_mod_reports_parse_warning_and_not_found_pair() {
+        // Pins the documented --config behavior: a broken mod folder yields
+        // BOTH the parse warning (from discovery) and the not-found warning
+        // (the mod never enters mod_map because its packageId is unknown).
+        let root = tempfile::tempdir().unwrap();
+        let mods_dir = root.path().join("Mods");
+        let broken = mods_dir.join("BrokenMod/About");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join("About.xml"), "<ModMetaData><unclosed>").unwrap();
+        let config = root.path().join("ModsConfig.xml");
+        std::fs::write(
+            &config,
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<ModsConfigData><version>1.5</version><activeMods><li>BrokenMod</li></activeMods></ModsConfigData>",
+        )
+        .unwrap();
+
+        let resolved = resolve_from_config(&config, root.path(), Some("1.5"));
+        assert!(resolved.mods.is_empty());
+        assert_eq!(
+            resolved.diagnostics.len(),
+            2,
+            "parse warning + not-found warning: {:?}",
+            resolved
+                .diagnostics
+                .iter()
+                .map(|d| &d.message)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("Failed to parse mod"))
+        );
+        assert!(
+            resolved
+                .diagnostics
+                .iter()
+                .any(|d| d.message.contains("may have failed to parse"))
+        );
+    }
 
     #[test]
     fn mark_base_content_identifies_ludeon_mods() {

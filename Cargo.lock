@@ -636,6 +636,7 @@ dependencies = [
  "rcd-harmony",
  "rcd-xml",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
