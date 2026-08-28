@@ -17,7 +17,7 @@ pub use conflict::{
     HarmonyPatchKind, HarmonyTarget,
 };
 pub use detector::{Detector, Engine, ProgressFn};
-pub use diagnostic::{Diagnostic, DiagnosticSource};
+pub use diagnostic::{Diagnostic, DiagnosticSource, about_parse_failure};
 pub use report::Report;
 pub use severity::Severity;
 pub use types::{LoadOrder, Mod, ModSummary};

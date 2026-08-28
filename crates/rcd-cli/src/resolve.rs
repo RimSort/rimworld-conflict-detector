@@ -1,5 +1,5 @@
 use rcd_core::about_xml::parse_about_xml;
-use rcd_core::diagnostic::{Diagnostic, DiagnosticSource};
+use rcd_core::diagnostic::{Diagnostic, DiagnosticSource, about_parse_failure};
 use rcd_core::folder::{discover_mods, resolve_mod_folders};
 use rcd_core::severity::Severity;
 use rcd_core::types::{LoadOrder, Mod};
@@ -37,12 +37,12 @@ pub fn resolve_from_mod_paths(
                 resolve_mod_folders(&mut m, game_version, None);
                 mods.push(m);
             }
-            Err(e) => diagnostics.push(Diagnostic {
-                affected_mod: None,
-                severity: Severity::Error,
-                message: format!("Failed to parse mod at {:?}: {}", path, e),
-                source: DiagnosticSource::MetadataResolution,
-            }),
+            Err(e) => diagnostics.push(about_parse_failure(
+                path,
+                &e,
+                Severity::Error,
+                DiagnosticSource::MetadataResolution,
+            )),
         }
     }
 
@@ -114,7 +114,10 @@ pub fn resolve_from_config(
             None => diagnostics.push(Diagnostic {
                 affected_mod: Some(package_id.clone()),
                 severity: Severity::Warning,
-                message: format!("Mod '{}' not found in search directories", package_id),
+                message: format!(
+                    "Mod '{}' not found in search directories (a mod folder may have failed to parse — see FolderResolution diagnostics)",
+                    package_id
+                ),
                 source: DiagnosticSource::MetadataResolution,
             }),
         }

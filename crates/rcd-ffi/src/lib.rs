@@ -57,12 +57,12 @@ pub unsafe extern "C" fn rcd_analyze(
                     rcd_core::folder::resolve_mod_folders(&mut m, game_version, None);
                     mods.push(m);
                 }
-                Err(e) => pre_diagnostics.push(rcd_core::Diagnostic {
-                    affected_mod: None,
-                    severity: rcd_core::Severity::Error,
-                    message: format!("Failed to parse mod at {}: {}", path.display(), e),
-                    source: rcd_core::DiagnosticSource::MetadataResolution,
-                }),
+                Err(e) => pre_diagnostics.push(rcd_core::diagnostic::about_parse_failure(
+                    path,
+                    &e,
+                    rcd_core::Severity::Error,
+                    rcd_core::DiagnosticSource::MetadataResolution,
+                )),
             }
         }
 

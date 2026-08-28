@@ -81,17 +81,17 @@ pub fn discover_mods(
             continue; // absent dir is normal (e.g., no Workshop install) — not an error
         }
 
-        let Ok(entries) = std::fs::read_dir(search_dir) else {
-            diagnostics.push(crate::Diagnostic {
-                affected_mod: None,
-                severity: crate::Severity::Warning,
-                message: format!(
-                    "Failed to read directory {}: permission denied or I/O error",
-                    search_dir.display()
-                ),
-                source: crate::DiagnosticSource::FolderResolution,
-            });
-            continue;
+        let entries = match std::fs::read_dir(search_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                diagnostics.push(crate::Diagnostic {
+                    affected_mod: None,
+                    severity: crate::Severity::Warning,
+                    message: format!("Failed to read directory {}: {}", search_dir.display(), e),
+                    source: crate::DiagnosticSource::FolderResolution,
+                });
+                continue;
+            }
         };
 
         for entry in entries {
@@ -127,18 +127,12 @@ pub fn discover_mods(
                     resolve_mod_folders(&mut mod_data, game_version, None);
                     mods.push(mod_data);
                 }
-                Err(e) => diagnostics.push(crate::Diagnostic {
-                    affected_mod: None, // package_id is unknown — parsing failed
-                    severity: crate::Severity::Warning,
-                    message: format!(
-                        "Failed to parse mod at {}: {}",
-                        path.file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_else(|| path.display().to_string()),
-                        e
-                    ),
-                    source: crate::DiagnosticSource::FolderResolution,
-                }),
+                Err(e) => diagnostics.push(crate::about_parse_failure(
+                    &path,
+                    &e,
+                    crate::Severity::Warning,
+                    crate::DiagnosticSource::FolderResolution,
+                )),
             }
         }
     }
@@ -208,6 +202,12 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, crate::Severity::Warning);
         assert!(diagnostics[0].message.contains("BrokenMod"));
+        assert!(
+            diagnostics[0]
+                .message
+                .contains(&dir.path().display().to_string()),
+            "message must carry the full path so --config can distinguish Data/ vs Mods/ vs Workshop"
+        );
         assert_eq!(
             diagnostics[0].source,
             crate::DiagnosticSource::FolderResolution
