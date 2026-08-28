@@ -127,6 +127,11 @@ pub fn parse_patches_from_xml(xml: &str, source: &str) -> (Vec<ParsedPatchOp>, V
         buf.clear();
     }
 
+    // FR-7a M-2: pre-check and structural capture report the same root error
+    // byte-identically; dedup collapses the guaranteed pair. See def_parser.
+    errors.sort();
+    errors.dedup();
+
     (ops, errors)
 }
 

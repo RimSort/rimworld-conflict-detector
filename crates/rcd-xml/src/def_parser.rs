@@ -61,20 +61,34 @@ pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, Vec<String>) {
 /// One-event-per-line scan that guarantees a diagnostic for any malformed
 /// document, even when structural parsing swallows the error in a best-effort
 /// nested read (quick-xml can latch after Err, hiding it from outer loops).
-/// Returns Some(message) when the document is not well-formed.
+///
+/// Depth-aware (FR-7a I-3): quick-xml is non-validating, so a document that
+/// merely ends inside open elements yields Ok(Eof) with no Err at all. The
+/// scan tracks element depth and reports unclosed elements at Eof; the Err
+/// message is byte-identical to the structural captures so the callers'
+/// sort+dedup collapses the guaranteed duplicate pair (M-2).
 pub(crate) fn check_well_formed(xml: &str, source: &str) -> Option<String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
+    let mut depth: u32 = 0;
     loop {
         match reader.read_event_into(&mut buf) {
-            Ok(Event::Eof) => return None,
+            Ok(Event::Start(_)) => depth += 1,
+            Ok(Event::End(_)) => depth = depth.saturating_sub(1),
+            Ok(Event::Eof) => {
+                return if depth > 0 {
+                    Some(format!(
+                        "XML parse error in {}: document ends with {} unclosed element(s) (results may be incomplete)",
+                        source, depth
+                    ))
+                } else {
+                    None
+                };
+            }
             Ok(_) => {}
             Err(e) => {
-                return Some(format!(
-                    "XML parse error in {}: {} (document not well-formed; results may be incomplete)",
-                    source, e
-                ));
+                return Some(format!("XML parse error in {}: {}", source, e));
             }
         }
         buf.clear();
@@ -146,6 +160,14 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, V
         }
         buf.clear();
     }
+
+    // FR-7a M-2: the pre-check and a structural capture can report the same
+    // root error at the same offset (same reader, same config); the messages
+    // are byte-identical, so dedup collapses the guaranteed pair. The
+    // depth-at-Eof diagnostic stays distinct — no structural site can
+    // produce it (it is the absence of an Err).
+    errors.sort();
+    errors.dedup();
 
     (defs, abstract_skipped, errors)
 }
@@ -225,13 +247,19 @@ fn parse_single_def(
                                 }
                                 // A non-matching close means we are past
                                 // defName's end; anything concatenated so far
-                                // is a fabricated identity.
+                                // is a fabricated identity. FR-7a M-1: when a
+                                // nested Start already poisoned and diagnosed
+                                // the root cause, this End is expected drain
+                                // behavior — re-diagnosing here would
+                                // misattribute a second cause.
+                                if !poisoned {
+                                    errors.push(format!(
+                                        "defName in {} closed by unexpected </{}>; def dropped",
+                                        source,
+                                        String::from_utf8_lossy(end.name().as_ref())
+                                    ));
+                                }
                                 poisoned = true;
-                                errors.push(format!(
-                                    "defName in {} closed by unexpected </{}>; def dropped",
-                                    source,
-                                    String::from_utf8_lossy(end.name().as_ref())
-                                ));
                                 break;
                             }
                             Ok(Event::Eof) | Err(_) => {
@@ -734,6 +762,29 @@ mod tests {
         assert!(
             errors.iter().any(|e| e.contains("nested markup")),
             "non-leaf defName must be diagnosed, not just dropped: {errors:?}"
+        );
+        // FR-7a M-1: the nested Start(b) already diagnosed the root cause; the
+        // drain's non-matching End(b) must not misattribute a second cause.
+        assert!(
+            !errors.iter().any(|e| e.contains("closed by unexpected")),
+            "exactly one drop diagnostic per cause: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn truncation_after_closed_defname_is_diagnosed() {
+        // FR-7a I-3: quick-xml is non-validating, so this document yields
+        // Ok(Eof) with no Err anywhere — the flat pre-check saw nothing and
+        // the def was KEPT with a fabricated, fully-closed raw_xml. Cross-mod
+        // diffing then compared that fabrication against complete defs
+        // (replacement.rs may still fire on it — the contract here is
+        // VISIBILITY: the depth diagnostic attributes any resulting conflict
+        // to the truncated source file).
+        let xml = r#"<Defs><ThingDef><defName>Steel</defName>"#;
+        let (_defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(
+            errors.iter().any(|e| e.contains("unclosed element")),
+            "pre-check must catch depth-at-Eof: {errors:?}"
         );
     }
 
