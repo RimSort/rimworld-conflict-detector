@@ -13,6 +13,22 @@ pub struct ResolvedMods {
 
 /// Resolve mods from a directory scan (order-agnostic).
 pub fn resolve_from_dir(dir: &Path, game_version: Option<&str>) -> ResolvedMods {
+    if !dir.is_dir() {
+        // discover_mods silently skips absent search dirs by design (correct
+        // for --config's incidental Data/Mods/Workshop probing), but an
+        // explicit --dir is user-named input: report it as Error so a typo'd
+        // path cannot exit 0 as a false clean.
+        return ResolvedMods {
+            mods: vec![],
+            load_order: None,
+            diagnostics: vec![Diagnostic {
+                affected_mod: None,
+                severity: Severity::Error,
+                message: format!("Mod directory does not exist: {}", dir.display()),
+                source: DiagnosticSource::MetadataResolution,
+            }],
+        };
+    }
     let (mut mods, diagnostics) = discover_mods(&[dir.to_path_buf()], game_version);
     mark_base_content(&mut mods);
     ResolvedMods {
@@ -191,6 +207,27 @@ mod tests {
             resolved.diagnostics[0]
                 .message
                 .contains("Failed to parse mod at")
+        );
+    }
+
+    #[test]
+    fn resolve_from_dir_reports_nonexistent_directory_as_error() {
+        // FR-6b: a typo'd explicit --dir must not exit clean. discover_mods
+        // silently skips absent dirs (correct for --config's incidental
+        // probing), but --dir is user-named input: Error/MetadataResolution,
+        // which the exit ladder maps to 2.
+        let resolved = resolve_from_dir(Path::new("/tmp/really-not-here-rcd-fr6b"), None);
+        assert!(resolved.mods.is_empty());
+        assert_eq!(resolved.diagnostics.len(), 1);
+        assert_eq!(resolved.diagnostics[0].severity, Severity::Error);
+        assert_eq!(
+            resolved.diagnostics[0].source,
+            rcd_core::DiagnosticSource::MetadataResolution
+        );
+        assert!(
+            resolved.diagnostics[0]
+                .message
+                .contains("/tmp/really-not-here-rcd-fr6b")
         );
     }
 

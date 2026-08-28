@@ -60,8 +60,11 @@ Other:
 | 2    | No mods found AND resolution diagnostics present; also usage/fatal errors |
 | 3    | Scan completed with error-level diagnostics (e.g. a mod failed to parse, or a load-order violation) |
 
-Precedence: 2 beats 1 beats 3. An empty scan with **no** diagnostics (e.g. `--dir`
-pointing at a nonexistent path — absent directories are skipped by design) exits 0.
+Precedence: 2 beats 1 beats 3. An empty scan with **no** diagnostics exits 0
+(e.g. `--dir` pointing at an existing but empty directory). A typo'd or
+nonexistent `--dir` is user-named input, so it yields an Error diagnostic and
+exits 2; absent directories among `--config` search paths (Data/Mods/Workshop)
+remain skipped by design, as not every install has all three.
 
 ## Building
 
