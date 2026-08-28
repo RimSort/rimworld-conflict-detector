@@ -34,7 +34,7 @@
 
 - [x] **Silent file I/O errors** — `def_parser`, `patch_ops`, `discover_assemblies` all use `.filter_map(|e| e.ok())` on walkdir iterators and `continue` on read failures. Should propagate as diagnostics.
 
-- [ ] **`defName` parser fragility** — Assumes the next event after `<defName>` opening tag is `Event::Text`. Comments or CDATA would cause silent failure. Worse: empty elements (`<defName></defName>`) cause parser desynchronization that swallows all subsequent sibling defs/operations (see review finding above).
+- [ ] **`defName` parser fragility** — Assumes the next event after `<defName>` opening tag is `Event::Text`. Comments or CDATA would cause silent failure. Worse: empty elements (`<defName></defName>`) cause parser desynchronization that swallows all subsequent sibling defs/operations (see review finding above). *(defName leg fixed on `fix/p1-error-propagation`: loop consumes End, CDATA/comments handled, nested markup diagnosed; xpath leg still open — `read_xpath_from_operation` in `patch_ops.rs` retains the one-shot Text-then-discard-End idiom)*
 
 - [ ] **No file size limits** — All file reads are unbounded. Add a reasonable max (e.g., 50MB) as a defensive measure.
 
@@ -70,17 +70,17 @@
 
 - [ ] **Raw XML reconstruction drops root def attributes** — `crates/rcd-xml/src/def_parser.rs:194`. `format!("<{def_type}>{inner_xml}</{def_type}>")` discards `Abstract`, `ParentName`, `Name` attributes from the opening tag. Two defs with identical inner content but different inheritance (e.g., one abstract, one concrete) are incorrectly considered identical, suppressing real replacement conflicts.
 
-- [ ] **Empty `<defName>`/`<xpath>` causes parser desynchronization** — `crates/rcd-xml/src/def_parser.rs:148-158` and `patch_ops.rs:316-326`. For `<defName></defName>`, the first read returns `Event::End` (not Text), then the second read consumes the *next* event — swallowing subsequent sibling defs or patch operations. Extends the "defName parser fragility" item above — the consequence is not just silent failure of one def, but cascading desync that loses all subsequent siblings.
+- [ ] **Empty `<defName>`/`<xpath>` causes parser desynchronization** — `crates/rcd-xml/src/def_parser.rs:148-158` and `patch_ops.rs:316-326`. For `<defName></defName>`, the first read returns `Event::End` (not Text), then the second read consumes the *next* event — swallowing subsequent sibling defs or patch operations. Extends the "defName parser fragility" item above — the consequence is not just silent failure of one def, but cascading desync that loses all subsequent siblings. *(defName leg fixed on `fix/p1-error-propagation`; xpath leg still open. Gate-review correction: "loses all subsequent siblings" was overstated — damage was in-def only, the outer loop resyncs at the next def `Start`)*
 
 ### Error Handling
 
-- [x] **`discover_mods` silently swallows I/O and parse errors** — `crates/rcd-core/src/folder.rs:81,98`. Uses `let Ok(entries) = ... else { continue }` and `if let Ok(mut mod_data) = parse_about_xml(...)`. Callers can't distinguish "no mods found" from "all mods failed to parse." Should return `(Vec<Mod>, Vec<Diagnostic>)` consistent with `parse_defs_dir`/`parse_patches_dir`.
+- [x] **`discover_mods` silently swallows I/O and parse errors** — `crates/rcd-core/src/folder.rs:72-139`. Uses `let Ok(entries) = ... else { continue }` and `if let Ok(mut mod_data) = parse_about_xml(...)`. Callers can't distinguish "no mods found" from "all mods failed to parse." Should return `(Vec<Mod>, Vec<Diagnostic>)` consistent with `parse_defs_dir`/`parse_patches_dir`.
 
-- [x] **FFI silently drops mods that fail to parse** — `crates/rcd-ffi/src/lib.rs:54`. Unlike the CLI which emits Error diagnostics for failed mods, the FFI boundary skips them with no visibility. Failed mods should be collected and included in `report.diagnostics`.
+- [x] **FFI silently drops mods that fail to parse** — `crates/rcd-ffi/src/lib.rs:53-66,101`. Unlike the CLI which emits Error diagnostics for failed mods, the FFI boundary skips them with no visibility. Failed mods should be collected and included in `report.diagnostics`.
 
-- [x] **XML parse errors silently ignored in def/patch parsers** — `def_parser.rs:109,180` and `patch_ops.rs:113,204,246,289,332,372,407`. Use `Err(_) => break` to silently ignore XML parse errors, returning partial results. Malformed XML containing conflicting defs produces false negatives.
+- [x] **XML parse errors silently ignored in def/patch parsers** — formerly `def_parser.rs:109,180` and `patch_ops.rs:113,204,246,289,332,372,407` (pre-fix positions). Used `Err(_) => break` to silently ignore XML parse errors, returning partial results. Malformed XML containing conflicting defs produces false negatives. *Fixed on `fix/p1-error-propagation`: every loop site now captures via a threaded errors vec, plus a `check_well_formed` pre-check per entry point for errors consumed by nested best-effort reads.*
 
-- [x] **Manual patch detection panics not reported as diagnostics** — `crates/rcd-harmony/src/lib.rs:94-110`. `catch_unwind` catches the panic but emits no diagnostic, unlike `parse_harmony_patches` (lines 60-82) which emits a Warning. Should use `match` instead of `if let Ok` to emit a diagnostic on `Err`.
+- [x] **Manual patch detection panics not reported as diagnostics** — `crates/rcd-harmony/src/lib.rs:93-118`. `catch_unwind` catches the panic but emits no diagnostic, unlike `parse_harmony_patches` (lines 60-82) which emits a Warning. Should use `match` instead of `if let Ok` to emit a diagnostic on `Err`.
 
 ### Performance
 
@@ -97,6 +97,17 @@
 - [ ] **FFI progress callback `phase` pointer lifetime undocumented** — `crates/rcd-ffi/src/lib.rs:6`. The `CString` is dropped at end of closure, so `*const c_char` is only valid during synchronous callback. If C# consumer retains the pointer, it's use-after-free. Safety contract should document this.
 
 - [ ] **FFI config uses untyped JSON with no schema validation** — `crates/rcd-ffi/src/lib.rs:30-46`. Manual `serde_json::Value` indexing — misspelled fields silently produce defaults, type mismatches silently produce empty results. Should use a typed `RcdConfig` struct with `#[derive(Deserialize)]`.
+
+## Follow-ups (final-review backlog)
+
+Items surfaced by the final cross-commit review and its gate reviews, deliberately not fixed in `fix/p1-error-propagation` to keep the branch review-sized:
+
+- [ ] **`patch_ops.rs` nested one-shot reads** — `read_xpath_from_operation`/`read_li_text_list` keep the Text-then-discard-End idiom the defName loop fixed; same desync/silent-drop class, in-def damage only.
+- [ ] **`replacement.rs` undecodable-text silent drops** — `normalize_whitespace` (:133) and `extract_tag_content`'s text arm discard `unescape()` errors; field content can vanish from the diff silently (pre-existing pattern).
+- [ ] **Comment/PI not re-emitted into `raw_xml`** — def_parser skips them from the reconstruction (matches pre-existing outer-loop behavior; only affects byte-fidelity of raw_xml, not identity).
+- [ ] **T1 manual-scan Err-arm test seam** — the `catch_unwind` Err→Warning arm in HarmonyDetector is verified by inspection only; a crash fixture was declined as YAGNI.
+- [ ] **`list-mods --format json` total failure is stderr-only** — scoped out of I-1 (scan-only); a machine consumer of list-mods still can't see resolution diagnostics.
+- [ ] **Concrete-def-no-defName diagnostic may need a config-file escape hatch** — mods shipping nameless concrete defs will now emit one warning per def (FR-2f reviewer note; acceptable today).
 
 ## Deferred Features (from spec)
 
