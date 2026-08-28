@@ -11,9 +11,7 @@ pub struct ModsConfig {
 
 impl ModsConfig {
     pub fn load_order(&self) -> LoadOrder {
-        LoadOrder {
-            package_ids: self.active_mods.clone(),
-        }
+        LoadOrder::new(self.active_mods.clone())
     }
 }
 

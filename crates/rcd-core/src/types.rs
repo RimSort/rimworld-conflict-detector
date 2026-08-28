@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,11 +43,24 @@ impl From<&Mod> for ModSummary {
 #[derive(Debug, Clone)]
 pub struct LoadOrder {
     pub package_ids: Vec<String>,
+    positions: HashMap<String, usize>,
 }
 
 impl LoadOrder {
+    pub fn new(package_ids: Vec<String>) -> Self {
+        let mut positions = HashMap::with_capacity(package_ids.len());
+        for (i, id) in package_ids.iter().enumerate() {
+            // First occurrence wins, matching the old Vec::position behavior.
+            positions.entry(id.clone()).or_insert(i);
+        }
+        Self {
+            package_ids,
+            positions,
+        }
+    }
+
     pub fn position(&self, package_id: &str) -> Option<usize> {
-        self.package_ids.iter().position(|id| id == package_id)
+        self.positions.get(package_id).copied()
     }
 
     pub fn is_after(&self, a: &str, b: &str) -> Option<bool> {
@@ -63,19 +77,35 @@ mod tests {
 
     #[test]
     fn load_order_position() {
-        let order = LoadOrder {
-            package_ids: vec!["core".into(), "mod.a".into(), "mod.b".into()],
-        };
+        let order = LoadOrder::new(vec!["core".into(), "mod.a".into(), "mod.b".into()]);
         assert_eq!(order.position("core"), Some(0));
         assert_eq!(order.position("mod.b"), Some(2));
         assert_eq!(order.position("unknown"), None);
     }
 
     #[test]
+    fn load_order_duplicate_package_id_first_occurrence_wins() {
+        let order = LoadOrder::new(vec!["core".into(), "mod.a".into(), "mod.a".into()]);
+        assert_eq!(
+            order.position("mod.a"),
+            Some(1),
+            "must match Vec::position semantics"
+        );
+    }
+
+    #[test]
+    fn load_order_position_matches_vec_semantics() {
+        let ids = vec!["a".into(), "b".into(), "c".into()];
+        let order = LoadOrder::new(ids.clone());
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(order.position(id), Some(i));
+        }
+        assert_eq!(order.position("missing"), None);
+    }
+
+    #[test]
     fn load_order_is_after() {
-        let order = LoadOrder {
-            package_ids: vec!["core".into(), "mod.a".into(), "mod.b".into()],
-        };
+        let order = LoadOrder::new(vec!["core".into(), "mod.a".into(), "mod.b".into()]);
         assert_eq!(order.is_after("mod.b", "mod.a"), Some(true));
         assert_eq!(order.is_after("mod.a", "mod.b"), Some(false));
         assert_eq!(order.is_after("mod.a", "unknown"), None);

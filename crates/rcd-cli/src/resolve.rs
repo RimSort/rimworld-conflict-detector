@@ -69,9 +69,9 @@ pub fn resolve_from_mod_paths(
     mark_base_content(&mut mods);
 
     let load_order = if ordered {
-        Some(LoadOrder {
-            package_ids: mods.iter().map(|m| m.package_id.clone()).collect(),
-        })
+        Some(LoadOrder::new(
+            mods.iter().map(|m| m.package_id.clone()).collect(),
+        ))
     } else {
         None
     };

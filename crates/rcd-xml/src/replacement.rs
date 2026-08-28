@@ -559,9 +559,7 @@ mod tests {
             }],
         };
 
-        let load_order = LoadOrder {
-            package_ids: vec!["test.mod.a".to_string(), "test.mod.b".to_string()],
-        };
+        let load_order = LoadOrder::new(vec!["test.mod.a".to_string(), "test.mod.b".to_string()]);
 
         let (conflicts, _errors) = detect_replacements(&[mod_a, mod_b], Some(&load_order));
         assert_eq!(conflicts.len(), 1);

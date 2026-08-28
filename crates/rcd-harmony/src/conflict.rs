@@ -384,13 +384,11 @@ mod tests {
 
     #[test]
     fn execution_order_from_priority() {
-        let order = LoadOrder {
-            package_ids: vec![
-                "mod.low".to_string(),
-                "mod.high".to_string(),
-                "mod.mid".to_string(),
-            ],
-        };
+        let order = LoadOrder::new(vec![
+            "mod.low".to_string(),
+            "mod.high".to_string(),
+            "mod.mid".to_string(),
+        ]);
 
         let all_patches = vec![
             (
@@ -447,9 +445,7 @@ mod tests {
 
     #[test]
     fn execution_order_tiebreak_by_load_order() {
-        let order = LoadOrder {
-            package_ids: vec!["mod.first".to_string(), "mod.second".to_string()],
-        };
+        let order = LoadOrder::new(vec!["mod.first".to_string(), "mod.second".to_string()]);
 
         let all_patches = vec![
             (
@@ -570,9 +566,7 @@ mod tests {
 
     #[test]
     fn before_after_constraints_override_load_order() {
-        let order = LoadOrder {
-            package_ids: vec!["mod.a".to_string(), "mod.b".to_string()],
-        };
+        let order = LoadOrder::new(vec!["mod.a".to_string(), "mod.b".to_string()]);
 
         // mod.a loads first but declares HarmonyAfter("mod.b"),
         // so mod.b should come before mod.a in execution order
