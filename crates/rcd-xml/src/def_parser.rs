@@ -263,11 +263,19 @@ fn parse_single_def(
                                 break;
                             }
                             Ok(Event::Eof) | Err(_) => {
+                                // FR-7a M-2: same !poisoned discipline as the
+                                // non-matching-End arm — a prior leaf-violation
+                                // already named the root cause, and
+                                // re-diagnosing here would emit a second,
+                                // misattributed drop message. Poison and break
+                                // regardless; only the push is guarded.
+                                if !poisoned {
+                                    errors.push(format!(
+                                        "defName in {} is not closed; def dropped",
+                                        source
+                                    ));
+                                }
                                 poisoned = true;
-                                errors.push(format!(
-                                    "defName in {} is not closed; def dropped",
-                                    source
-                                ));
                                 break;
                             }
                             Ok(Event::Start(_)) | Ok(Event::Empty(_)) => {
@@ -781,10 +789,48 @@ mod tests {
         // VISIBILITY: the depth diagnostic attributes any resulting conflict
         // to the truncated source file).
         let xml = r#"<Defs><ThingDef><defName>Steel</defName>"#;
-        let (_defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(
             errors.iter().any(|e| e.contains("unclosed element")),
             "pre-check must catch depth-at-Eof: {errors:?}"
+        );
+        // FR-7a gate Minor-4: pin the contract the comment above claims — the
+        // def is KEPT with a closed reconstruction (visibility, not
+        // suppression). Binding _defs let that claim drift untested.
+        assert_eq!(
+            defs.len(),
+            1,
+            "a def whose defName closed cleanly survives truncation: {errors:?}"
+        );
+        assert!(
+            defs[0].raw_xml.ends_with("</ThingDef>"),
+            "reconstruction stays fully closed: {:?}",
+            defs[0].raw_xml
+        );
+    }
+
+    #[test]
+    fn eof_after_nested_markup_poison_yields_single_drop_diagnostic() {
+        // FR-7a gate Minor-2: the Eof/Err drain arm pushed "is not closed"
+        // UNGUARDED, so a nested-markup poison followed by EOF diagnosed the
+        // same drop twice — the second message misattributing the cause.
+        let xml = r#"<Defs><ThingDef><defName>A<b>x"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(defs.is_empty(), "poisoned identity must drop the def");
+        // Scoped to drop-reason texts: the depth pre-check legitimately adds
+        // its own unrelated "unclosed element(s)" message.
+        let drop_reasons: Vec<_> = errors
+            .iter()
+            .filter(|e| e.contains("def dropped"))
+            .collect();
+        assert_eq!(
+            drop_reasons.len(),
+            1,
+            "exactly one cause-accurate drop diagnostic, got: {drop_reasons:?}"
+        );
+        assert!(
+            drop_reasons[0].contains("nested markup"),
+            "the surviving message must name the root cause: {drop_reasons:?}"
         );
     }
 
