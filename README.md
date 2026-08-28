@@ -57,8 +57,11 @@ Other:
 |------|---------|
 | 0    | Scan completed with no error-level conflicts and no error-level diagnostics |
 | 1    | Error-level conflicts detected |
-| 2    | Fatal error (no mods found, invalid arguments) |
-| 3    | Scan completed with error-level diagnostics (partial results, e.g. a mod failed to parse) |
+| 2    | No mods found AND resolution diagnostics present; also usage/fatal errors |
+| 3    | Scan completed with error-level diagnostics (e.g. a mod failed to parse, or a load-order violation) |
+
+Precedence: 2 beats 1 beats 3. An empty scan with **no** diagnostics (e.g. `--dir`
+pointing at a nonexistent path — absent directories are skipped by design) exits 0.
 
 ## Building
 

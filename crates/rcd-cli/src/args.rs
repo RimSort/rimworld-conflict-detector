@@ -5,7 +5,7 @@ use std::path::PathBuf;
 #[command(
     name = "rcd",
     about = "RimWorld Conflict Detector",
-    after_help = "Exit codes: 0 clean, 1 conflicts at Error severity, 2 no mods found / usage, 3 scan completed with Error-severity diagnostics (partial results)."
+    after_help = "Exit codes: 0 clean, 1 conflicts at Error severity, 2 no mods found AND resolution diagnostics present (usage errors also exit 2), 3 scan completed with Error-severity diagnostics (e.g. a mod failed to parse, or a load-order violation). Precedence: 2 beats 1 beats 3."
 )]
 pub struct Cli {
     #[command(subcommand)]
