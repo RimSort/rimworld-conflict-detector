@@ -136,7 +136,8 @@ fn run_scan(
 /// Exit-code ladder, isolated for automated coverage: 2 (total resolution
 /// failure: no mods scanned AND diagnostics exist) beats 1 (conflict Errors)
 /// beats 3 (Error-severity diagnostics) beats 0 (clean). An empty scan with
-/// NO diagnostics (e.g. --dir on a nonexistent path, silent by design) is 0.
+/// NO diagnostics (e.g. --dir on an existing but empty directory) is 0; a
+/// nonexistent --dir yields an Error diagnostic and therefore exits 2.
 fn exit_code_for(report: &rcd_core::Report) -> i32 {
     if report.metadata.mods_scanned.is_empty() && !report.diagnostics.is_empty() {
         2 // total resolution failure — machine-readable diagnostics already on stdout
@@ -275,8 +276,9 @@ mod tests {
         );
         assert_eq!(exit_code_for(&one_beats_three), 1);
 
-        // Empty scan with NO diagnostics (nonexistent --dir, silent by design)
-        // is clean, not a "total failure".
+        // Empty scan with NO diagnostics (existing but empty --dir) is
+        // clean, not a "total failure"; a nonexistent --dir has diagnostics
+        // and is covered by resolve_from_dir_reports_nonexistent_directory_as_error.
         let empty_clean = Report::build(meta(vec![]), vec![], vec![]);
         assert_eq!(exit_code_for(&empty_clean), 0);
     }

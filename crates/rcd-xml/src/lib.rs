@@ -61,7 +61,7 @@ impl Detector for XmlDetector {
                         affected_mod: Some(mod_summary.package_id.clone()),
                         severity: Severity::Info,
                         message: format!(
-                            "Skipped {} abstract def(s) without defName",
+                            "Skipped {} abstract def(s) without a usable defName",
                             abstract_skipped
                         ),
                         source: DiagnosticSource::XmlParsing,

@@ -68,9 +68,9 @@
 
 - [ ] **FFI `is_base_content` still not set** — `crates/rcd-ffi/src/lib.rs:54`. The CLI-side fix for this (marked `[x]` above) only covers `resolve.rs`. The FFI calls `parse_about_xml` + `resolve_mod_folders` directly without the `ludeon.*` heuristic. C# consumers always get `is_base_content: false` for Core/DLC mods.
 
-- [ ] **Raw XML reconstruction drops root def attributes** — `crates/rcd-xml/src/def_parser.rs:194`. `format!("<{def_type}>{inner_xml}</{def_type}>")` discards `Abstract`, `ParentName`, `Name` attributes from the opening tag. Two defs with identical inner content but different inheritance (e.g., one abstract, one concrete) are incorrectly considered identical, suppressing real replacement conflicts.
+- [ ] **Raw XML reconstruction drops root def attributes** — `crates/rcd-xml/src/def_parser.rs` (`parse_single_def`, raw_xml reconstruction). `format!("<{def_type}>{inner_xml}</{def_type}>")` discards `Abstract`, `ParentName`, `Name` attributes from the opening tag. Two defs with identical inner content but different inheritance (e.g., one abstract, one concrete) are incorrectly considered identical, suppressing real replacement conflicts.
 
-- [ ] **Empty `<defName>`/`<xpath>` causes parser desynchronization** — `crates/rcd-xml/src/def_parser.rs:148-158` and `patch_ops.rs:316-326`. For `<defName></defName>`, the first read returns `Event::End` (not Text), then the second read consumes the *next* event — swallowing subsequent sibling defs or patch operations. Extends the "defName parser fragility" item above — the consequence is not just silent failure of one def, but cascading desync that loses all subsequent siblings. *(defName leg fixed on `fix/p1-error-propagation`; xpath leg still open. Gate-review correction: "loses all subsequent siblings" was overstated — damage was in-def only, the outer loop resyncs at the next def `Start`)*
+- [ ] **Empty `<defName>`/`<xpath>` causes parser desynchronization** — `crates/rcd-xml/src/def_parser.rs:148-158` and `patch_ops.rs` (`read_xpath_from_operation`). For `<defName></defName>`, the first read returns `Event::End` (not Text), then the second read consumes the *next* event — swallowing subsequent sibling defs or patch operations. Extends the "defName parser fragility" item above — the consequence is not just silent failure of one def, but cascading desync that loses all subsequent siblings. *(defName leg fixed on `fix/p1-error-propagation`; xpath leg still open. Gate-review correction: "loses all subsequent siblings" was overstated — damage was in-def only, the outer loop resyncs at the next def `Start`)*
 
 ### Error Handling
 
@@ -103,7 +103,7 @@
 Items surfaced by the final cross-commit review and its gate reviews, deliberately not fixed in `fix/p1-error-propagation` to keep the branch review-sized:
 
 - [ ] **`patch_ops.rs` nested one-shot reads** — `read_xpath_from_operation`/`read_li_text_list` keep the Text-then-discard-End idiom the defName loop fixed; same desync/silent-drop class, in-def damage only.
-- [ ] **`replacement.rs` undecodable-text silent drops** — `normalize_whitespace` (:133) and `extract_tag_content`'s text arm discard `unescape()` errors; field content can vanish from the diff silently (pre-existing pattern).
+- [ ] **`replacement.rs` undecodable-text silent drops** — `normalize_whitespace` and `extract_tag_content`'s text arm discard `unescape()` errors; field content can vanish from the diff silently (pre-existing pattern).
 - [ ] **Comment/PI not re-emitted into `raw_xml`** — def_parser skips them from the reconstruction (matches pre-existing outer-loop behavior; only affects byte-fidelity of raw_xml, not identity).
 - [ ] **T1 manual-scan Err-arm test seam** — the `catch_unwind` Err→Warning arm in HarmonyDetector is verified by inspection only; a crash fixture was declined as YAGNI.
 - [ ] **`list-mods --format json` total failure is stderr-only** — scoped out of I-1 (scan-only); a machine consumer of list-mods still can't see resolution diagnostics.

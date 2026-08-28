@@ -24,7 +24,11 @@ pub fn resolve_from_dir(dir: &Path, game_version: Option<&str>) -> ResolvedMods 
             diagnostics: vec![Diagnostic {
                 affected_mod: None,
                 severity: Severity::Error,
-                message: format!("Mod directory does not exist: {}", dir.display()),
+                message: if dir.exists() {
+                    format!("Mod directory is not a directory: {}", dir.display())
+                } else {
+                    format!("Mod directory does not exist: {}", dir.display())
+                },
                 source: DiagnosticSource::MetadataResolution,
             }],
         };
@@ -216,7 +220,9 @@ mod tests {
         // silently skips absent dirs (correct for --config's incidental
         // probing), but --dir is user-named input: Error/MetadataResolution,
         // which the exit ladder maps to 2.
-        let resolved = resolve_from_dir(Path::new("/tmp/really-not-here-rcd-fr6b"), None);
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("does-not-exist");
+        let resolved = resolve_from_dir(&missing, None);
         assert!(resolved.mods.is_empty());
         assert_eq!(resolved.diagnostics.len(), 1);
         assert_eq!(resolved.diagnostics[0].severity, Severity::Error);
@@ -227,7 +233,34 @@ mod tests {
         assert!(
             resolved.diagnostics[0]
                 .message
-                .contains("/tmp/really-not-here-rcd-fr6b")
+                .contains("Mod directory does not exist"),
+            "absent path must say 'does not exist': {}",
+            resolved.diagnostics[0].message
+        );
+        assert!(
+            resolved.diagnostics[0]
+                .message
+                .contains(&missing.display().to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_from_dir_reports_file_path_as_not_a_directory() {
+        // M-3: an EXISTING regular file passed as --dir must not be reported
+        // as "does not exist".
+        let root = tempfile::tempdir().unwrap();
+        let file = root.path().join("not_a_dir");
+        std::fs::write(&file, "x").unwrap();
+        let resolved = resolve_from_dir(&file, None);
+        assert!(resolved.mods.is_empty());
+        assert_eq!(resolved.diagnostics.len(), 1);
+        assert_eq!(resolved.diagnostics[0].severity, Severity::Error);
+        assert!(
+            resolved.diagnostics[0]
+                .message
+                .contains("Mod directory is not a directory"),
+            "existing file must say 'is not a directory': {}",
+            resolved.diagnostics[0].message
         );
     }
 
