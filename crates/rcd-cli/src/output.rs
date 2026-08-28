@@ -68,8 +68,15 @@ pub fn format_human(
 ) -> String {
     let mut output = String::new();
 
-    // Diagnostics first
-    for d in &report.diagnostics {
+    // Diagnostics first, filtered by min_severity for consistency with the
+    // conflict list below. JSON output stays complete (machine consumers get
+    // everything); this filter applies to human output only — see README.
+    let shown: Vec<_> = report
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity >= min_severity)
+        .collect();
+    for d in &shown {
         let sev_display = if use_color {
             match d.severity {
                 Severity::Error => format!("{}", d.severity).red().bold().to_string(),
@@ -86,7 +93,7 @@ pub fn format_human(
             d.message
         ));
     }
-    if !report.diagnostics.is_empty() {
+    if !shown.is_empty() {
         output.push('\n');
     }
 
@@ -162,39 +169,59 @@ pub fn format_human(
         }
     }
 
-    // Summary
-    if use_color {
-        output.push_str(&format!(
-            "Summary: {} error(s), {} warning(s), {} info\n",
-            report
-                .summary
-                .conflicts_by_severity
-                .error
-                .to_string()
-                .red()
-                .bold(),
-            report
-                .summary
-                .conflicts_by_severity
-                .warning
-                .to_string()
-                .yellow()
-                .bold(),
-            report
-                .summary
-                .conflicts_by_severity
-                .info
-                .to_string()
-                .dimmed()
-        ));
+    // Summary: conflict counts (byte-identical to the prior format) plus,
+    // when any exist, diagnostic counts — so an exit-3 report no longer
+    // prints "0 error(s)" while a mod failed to load.
+    let (ce, cw, ci) = (
+        report.summary.conflicts_by_severity.error,
+        report.summary.conflicts_by_severity.warning,
+        report.summary.conflicts_by_severity.info,
+    );
+    let mut summary = if use_color {
+        format!(
+            "Summary: {} error(s), {} warning(s), {} info",
+            ce.to_string().red().bold(),
+            cw.to_string().yellow().bold(),
+            ci.to_string().dimmed(),
+        )
     } else {
-        output.push_str(&format!(
-            "Summary: {} error(s), {} warning(s), {} info\n",
-            report.summary.conflicts_by_severity.error,
-            report.summary.conflicts_by_severity.warning,
-            report.summary.conflicts_by_severity.info
+        format!("Summary: {} error(s), {} warning(s), {} info", ce, cw, ci)
+    };
+    if !report.diagnostics.is_empty() {
+        let de = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .count();
+        let dw = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .count();
+        let di = report
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == Severity::Info)
+            .count();
+        let (des, dws, dis) = if use_color {
+            (
+                de.to_string().red().bold().to_string(),
+                dw.to_string().yellow().bold().to_string(),
+                di.to_string().dimmed().to_string(),
+            )
+        } else {
+            (de.to_string(), dw.to_string(), di.to_string())
+        };
+        summary.push_str(&format!(
+            " | {} error diagnostic(s), {} warning diagnostic(s)",
+            des, dws
         ));
+        if di > 0 {
+            summary.push_str(&format!(", {} info diagnostic(s)", dis));
+        }
     }
+    summary.push('\n');
+    output.push_str(&summary);
 
     output
 }
@@ -323,6 +350,70 @@ mod tests {
         assert!(
             output.contains('\x1b'),
             "colored output should contain ANSI escapes"
+        );
+    }
+
+    fn diag(sev: Severity, msg: &str) -> rcd_core::Diagnostic {
+        rcd_core::Diagnostic {
+            affected_mod: Some("test.mod".into()),
+            severity: sev,
+            message: msg.into(),
+            source: rcd_core::DiagnosticSource::XmlParsing,
+        }
+    }
+
+    #[test]
+    fn format_human_filters_diagnostics_by_severity() {
+        let mut report = empty_report();
+        report.diagnostics = vec![
+            diag(Severity::Warning, "warn diag"),
+            diag(Severity::Error, "err diag"),
+        ];
+        let out = format_human(&report, Severity::Error, &GroupBy::Severity, false);
+        assert!(
+            out.contains("err diag"),
+            "Error diagnostic must show at --severity error"
+        );
+        assert!(
+            !out.contains("warn diag"),
+            "Warning diagnostic must be hidden at --severity error"
+        );
+    }
+
+    #[test]
+    fn format_human_summary_counts_diagnostics() {
+        let mut report = empty_report();
+        report.diagnostics = vec![
+            diag(Severity::Error, "e"),
+            diag(Severity::Warning, "w1"),
+            diag(Severity::Warning, "w2"),
+        ];
+        let out = format_human(&report, Severity::Info, &GroupBy::Severity, false);
+        assert!(
+            out.contains("1 error diagnostic(s)"),
+            "summary must count error diagnostics: {out}"
+        );
+        assert!(
+            out.contains("2 warning diagnostic(s)"),
+            "summary must count warning diagnostics: {out}"
+        );
+        assert!(
+            !out.contains("info diagnostic(s)"),
+            "zero info diagnostics are omitted: {out}"
+        );
+    }
+
+    #[test]
+    fn format_human_summary_unchanged_without_diagnostics() {
+        let report = empty_report();
+        let out = format_human(&report, Severity::Info, &GroupBy::Severity, false);
+        assert!(
+            out.contains("Summary: 0 error(s), 0 warning(s), 0 info\n"),
+            "conflict summary must stay byte-identical when there are no diagnostics"
+        );
+        assert!(
+            !out.contains("diagnostic(s)"),
+            "no diagnostic clause when diagnostics are empty"
         );
     }
 }

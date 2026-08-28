@@ -1,0 +1,153 @@
+//! Process-level tests for the CLI exit-code ladder and the resolution→report
+//! diagnostics splice. These drive the real `rcd` binary (no new deps) to pin
+//! the wiring that in-process unit tests cannot reach: `process::exit` codes and
+//! the `report.diagnostics.splice(0..0, ..)` merge.
+
+use std::fs;
+use std::process::Command;
+
+const VALID: &str = "<ModMetaData><packageId>test.good</packageId></ModMetaData>";
+const BROKEN: &str = "<ModMetaData><unclosed>";
+
+fn write_about(mod_dir: &std::path::Path, xml: &str) {
+    let about = mod_dir.join("About");
+    fs::create_dir_all(&about).unwrap();
+    fs::write(about.join("About.xml"), xml).unwrap();
+}
+
+fn rcd() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_rcd"))
+}
+
+fn stdout_string(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr_string(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// (a) Every mod fails to resolve → exit 2, but JSON mode still emits a full,
+/// parseable report carrying the diagnostics (the I-1 fix).
+#[test]
+fn json_total_failure_exits_2_with_report_on_stdout() {
+    let dir = tempfile::tempdir().unwrap();
+    write_about(&dir.path().join("BrokenMod"), BROKEN);
+
+    let out = rcd()
+        .args([
+            "--format",
+            "json",
+            "scan",
+            "--dir",
+            dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "expected exit 2; stdout={} stderr={}",
+        stdout_string(&out),
+        stderr_string(&out)
+    );
+
+    let json: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON on total failure");
+    assert!(
+        json["metadata"]["mods_scanned"]
+            .as_array()
+            .expect("mods_scanned array")
+            .is_empty(),
+        "no mods resolved: {}",
+        stdout_string(&out)
+    );
+    assert!(
+        json["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .iter()
+            .any(|d| d["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Failed to parse mod")),
+        "resolution diagnostic must be present in JSON: {}",
+        stdout_string(&out)
+    );
+}
+
+/// (b) A clean single-mod scan → exit 0.
+#[test]
+fn clean_scan_exits_0() {
+    let dir = tempfile::tempdir().unwrap();
+    write_about(&dir.path().join("GoodMod"), VALID);
+
+    let out = rcd()
+        .args(["scan", "--dir", dir.path().to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "expected exit 0; stdout={} stderr={}",
+        stdout_string(&out),
+        stderr_string(&out)
+    );
+}
+
+/// (c) A valid mod plus an explicitly-named broken path → the good mod is
+/// scanned (so not exit 2), there are no conflicts (so not exit 1), but an
+/// Error-severity diagnostic exists → exit 3.
+#[test]
+fn error_diagnostic_without_conflicts_exits_3() {
+    let dir = tempfile::tempdir().unwrap();
+    let broken = dir.path().join("BrokenMod");
+    let good = dir.path().join("GoodMod");
+    write_about(&broken, BROKEN);
+    write_about(&good, VALID);
+
+    let out = rcd()
+        .args([
+            "--format",
+            "json",
+            "scan",
+            "--mods",
+            broken.to_str().unwrap(),
+            good.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "expected exit 3; stdout={} stderr={}",
+        stdout_string(&out),
+        stderr_string(&out)
+    );
+
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(
+        !json["metadata"]["mods_scanned"]
+            .as_array()
+            .expect("mods_scanned array")
+            .is_empty(),
+        "the good mod must still be scanned: {}",
+        stdout_string(&out)
+    );
+    assert!(
+        json["diagnostics"]
+            .as_array()
+            .expect("diagnostics array")
+            .iter()
+            .any(|d| d["severity"] == "error"
+                && d["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("Failed to parse mod")),
+        "an Error diagnostic must be present: {}",
+        stdout_string(&out)
+    );
+}

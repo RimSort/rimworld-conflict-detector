@@ -43,7 +43,7 @@ Input (mutually exclusive):
 
 Output:
   --format <human|json>     Output format (default: human)
-  --severity <error|warning|info>  Minimum severity to display (default: info)
+  --severity <error|warning|info>  Minimum severity to display in human output (default: info; JSON always emits everything)
   --group-by <severity|mod> Grouping in human output (default: severity)
 
 Other:
