@@ -86,6 +86,9 @@ pub(crate) fn check_well_formed(xml: &str, source: &str) -> Option<String> {
 /// captures the raw XML of the entire def element.
 ///
 /// Abstract defs (those with `Abstract="True"`) that lack a `defName` are skipped.
+/// Defs whose defName identity is untrustworthy are also skipped — each such
+/// drop is diagnosed in the returned errors (a poisoned ABSTRACT def also
+/// surfaces in `abstract_skipped`, whose count conflates the two causes).
 ///
 /// Returns a tuple of (parsed defs, count of abstract defs without defName that were skipped, parse errors).
 pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, Vec<String>) {
@@ -149,7 +152,9 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, V
 
 /// Parses a single def element that we've already seen the opening tag for.
 /// Reads child elements to find `defName`, and reconstructs the raw XML string.
-/// Returns `None` if the def is abstract and has no defName.
+/// Returns `None` if the def is abstract and has no defName, or if its
+/// defName identity was poisoned (nested markup, undecodable text, or an
+/// unclosed/mismatched close — each diagnosed in `errors`).
 fn parse_single_def(
     reader: &mut Reader<&[u8]>,
     def_type: &str,
@@ -159,6 +164,9 @@ fn parse_single_def(
 ) -> Option<ParsedDef> {
     let mut def_name: Option<String> = None;
     // Set when the defName identity is untrustworthy (see defName block below).
+    // Function-scoped on purpose: any poison kills the identity from EVERY
+    // sibling defName block; a block-local flag would let a clean second
+    // block rescue a poisoned first one (see unclosed_defname_at_eof test).
     let mut poisoned = false;
     let mut depth: u32 = 1;
     let mut inner_xml = String::new();
@@ -234,13 +242,33 @@ fn parse_single_def(
                                 ));
                                 break;
                             }
-                            _ => {
-                                // Start/Empty/Comment/PI inside defName: not a
-                                // leaf. Keep draining (the mismatched End or
-                                // EOF below will break) but the identity is
-                                // already poisoned.
+                            Ok(Event::Start(_)) | Ok(Event::Empty(_)) => {
+                                // defName is a leaf: nested markup makes the
+                                // identity untrustworthy. The matching End
+                                // below exits WITHOUT a diagnostic, so
+                                // diagnose at the first violation; then keep
+                                // draining to the close.
+                                if !poisoned {
+                                    errors.push(format!(
+                                        "defName in {} contains nested markup; defName is a leaf: def dropped",
+                                        source
+                                    ));
+                                }
                                 poisoned = true;
                             }
+                            Ok(Event::Comment(_))
+                            | Ok(Event::PI(_))
+                            | Ok(Event::Decl(_))
+                            | Ok(Event::DocType(_)) => {
+                                // Comments and PIs carry no element content:
+                                // skip, keep the def, identity from remaining
+                                // Text/CData. Dropping a working def over an
+                                // inline comment would recreate the false
+                                // negatives this branch exists to eliminate.
+                            } // No catch-all: quick-xml 0.37.5 emits no other
+                              // Ok variants, so the arms above are exhaustive
+                              // (a `_` here would be dead code, and dead code
+                              // is where future event kinds would hide).
                         }
                         inner_buf.clear();
                     }
@@ -564,6 +592,10 @@ mod tests {
 
     #[test]
     fn undecodable_defname_reports_instead_of_vanishing() {
+        // Regression pin (passed pre-fix too): a single Text segment's
+        // unescape is all-or-nothing, so this shape never registered a
+        // partial identity. The discriminating multi-segment case is
+        // cdata_then_bad_entity_drops_def.
         let xml = r#"<Defs><ThingDef><defName>bad &foo; entity</defName></ThingDef></Defs>"#;
         let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(defs.is_empty());
@@ -679,13 +711,56 @@ mod tests {
         // the real </defName> into raw_xml as a duplicate close. defName is a
         // leaf in RimWorld's schema: any nested markup poisons identity.
         let xml = r#"<Defs><ThingDef><defName>A<b>x</b>&foo;</defName><label>y</label></ThingDef></Defs>"#;
-        let (defs, _s, _errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(
             defs.is_empty(),
             "non-leaf defName must drop the def, not fabricate an identity: {:?}",
             defs.iter()
                 .map(|d| (&d.def_name, &d.raw_xml))
                 .collect::<Vec<_>>()
+        );
+        // FR-2f: the drop itself was never the contract — the VISIBLE drop
+        // was. Asserting only the def vanished is what let the silent
+        // poison path ship green in FR-2e.
+        assert!(
+            errors.iter().any(|e| e.contains("nested markup")),
+            "non-leaf defName must be diagnosed, not just dropped: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nested_markup_in_defname_drops_with_diagnostic() {
+        // FR-2e gate I-1: the leaf-violation arm poisoned silently when the
+        // block exited via the MATCHING </defName> (the drain comment's
+        // "mismatched End or EOF will break" was false) — defs vanished with
+        // zero diagnostics. Both markup shapes must now diagnose at the
+        // first violation.
+        for xml in [
+            r#"<Defs><ThingDef><defName><v/></defName></ThingDef></Defs>"#,
+            r#"<Defs><ThingDef><defName>A<b>x</b></defName></ThingDef></Defs>"#,
+        ] {
+            let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+            assert!(defs.is_empty(), "{xml}");
+            assert!(
+                errors.iter().any(|e| e.contains("nested markup")),
+                "leaf-violation drop must be diagnosed: {xml} errors={errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn comment_inside_defname_is_skipped_not_fatal() {
+        // RimWorld mods really write this. Comments carry no element content:
+        // skip them, keep the def, identity from the remaining text.
+        let xml = r#"<Defs><ThingDef><defName> <!-- legacy --> Steel</defName><label>x</label></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].def_name, "Steel");
+        assert!(
+            check_well_formed(&defs[0].raw_xml, "raw").is_none(),
+            "{}",
+            defs[0].raw_xml
         );
     }
 
