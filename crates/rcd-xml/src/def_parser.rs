@@ -158,6 +158,8 @@ fn parse_single_def(
     errors: &mut Vec<String>,
 ) -> Option<ParsedDef> {
     let mut def_name: Option<String> = None;
+    // Set when the defName identity is untrustworthy (see defName block below).
+    let mut poisoned = false;
     let mut depth: u32 = 1;
     let mut inner_xml = String::new();
     let mut buf = Vec::new();
@@ -177,6 +179,12 @@ fn parse_single_def(
                 // identity. Consuming the End here — instead of the old
                 // one-shot reads — is what keeps CDATA defNames resolving and
                 // empty <defName></defName> from swallowing the next sibling.
+                //
+                // defName is a LEAF in RimWorld's schema: nested markup, a
+                // close with the wrong name, EOF, or a decode failure make the
+                // identity untrustworthy. def_name is the join key for
+                // cross-mod conflict detection, so a truncated or fabricated
+                // identity is worse than none — such defs are dropped, visibly.
                 if depth == 2 && tag == "defName" {
                     let mut raw = String::new();
                     let mut decoded = String::new();
@@ -189,13 +197,13 @@ fn parse_single_def(
                                 // trim_text config (matches patch_ops convention).
                                 match t.unescape() {
                                     Ok(name) => decoded.push_str(&name),
-                                    // An undecodable defName drops the def
-                                    // (identity is unknown) — say so instead
-                                    // of vanishing silently.
-                                    Err(e) => errors.push(format!(
-                                        "defName in {} could not be decoded: {}",
-                                        source, e
-                                    )),
+                                    Err(e) => {
+                                        poisoned = true;
+                                        errors.push(format!(
+                                            "defName in {} could not be decoded: {}",
+                                            source, e
+                                        ));
+                                    }
                                 }
                             }
                             Ok(Event::CData(ref c)) => {
@@ -203,22 +211,48 @@ fn parse_single_def(
                                 raw.push_str(&format!("<![CDATA[{}]]>", content));
                                 decoded.push_str(&content);
                             }
-                            Ok(Event::End(_)) => {
-                                inner_xml.push_str(&raw);
-                                inner_xml.push_str(&format!("</{tag}>"));
-                                let trimmed = decoded.trim();
-                                if !trimmed.is_empty() {
-                                    def_name = Some(trimmed.to_string());
+                            Ok(Event::End(ref end)) => {
+                                if end.name().as_ref() == &b"defName"[..] {
+                                    break;
                                 }
+                                // A non-matching close means we are past
+                                // defName's end; anything concatenated so far
+                                // is a fabricated identity.
+                                poisoned = true;
+                                errors.push(format!(
+                                    "defName in {} closed by unexpected </{}>; def dropped",
+                                    source,
+                                    String::from_utf8_lossy(end.name().as_ref())
+                                ));
                                 break;
                             }
-                            // Unclosed defName: leave def_name unset so the
-                            // def is dropped; the pre-check/outer loop owns
-                            // the diagnostic.
-                            Ok(Event::Eof) | Err(_) => break,
-                            _ => {}
+                            Ok(Event::Eof) | Err(_) => {
+                                poisoned = true;
+                                errors.push(format!(
+                                    "defName in {} is not closed; def dropped",
+                                    source
+                                ));
+                                break;
+                            }
+                            _ => {
+                                // Start/Empty/Comment/PI inside defName: not a
+                                // leaf. Keep draining (the mismatched End or
+                                // EOF below will break) but the identity is
+                                // already poisoned.
+                                poisoned = true;
+                            }
                         }
                         inner_buf.clear();
+                    }
+                    // Single push on every exit path, so the reconstruction
+                    // stays well-formed even for defs we then drop.
+                    inner_xml.push_str(&raw);
+                    inner_xml.push_str(&format!("</{tag}>"));
+                    if !poisoned {
+                        let trimmed = decoded.trim();
+                        if !trimmed.is_empty() {
+                            def_name = Some(trimmed.to_string());
+                        }
                     }
                     depth -= 1;
                 }
@@ -258,6 +292,12 @@ fn parse_single_def(
             _ => {}
         }
         buf.clear();
+    }
+
+    // Poisoned identity: drop the def. The diagnostic was pushed at the
+    // poison site; never register a def under an untrustworthy name.
+    if poisoned {
+        return None;
     }
 
     // Skip abstract defs that don't have a defName
@@ -569,19 +609,103 @@ mod tests {
 
     #[test]
     fn empty_defname_does_not_swallow_following_sibling() {
-        // P0 regression: the old one-shot End read consumed the NEXT Start event,
-        // losing every def after an empty <defName></defName>.
-        let xml = r#"<Defs>
-    <ThingDef><defName></defName><label>ghost</label></ThingDef>
-    <ThingDef><defName>Real</defName><label>x</label></ThingDef>
-</Defs>"#;
-        let (defs, _s, _errors) = parse_defs_from_xml(xml, "t.xml");
+        // Discriminating P0 regression: the old one-shot End read consumed the
+        // NEXT Start event, so the damage was IN-DEF — sibling elements of the
+        // same def were truncated out of raw_xml. (The outer loop resyncs at
+        // the next def's Start, so later defs always survived; the previous
+        // version of this test asserted only that, and passed pre-fix.)
+        // Here the def keeps identity from the FIRST defName; the empty second
+        // one must consume its own End and leave <label> intact.
+        let xml = r#"<Defs><ThingDef><defName>A</defName><defName></defName><label>x</label></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].def_name, "A");
         assert!(
-            defs.iter().any(|d| d.def_name == "Real"),
-            "def after empty defName must survive: {:?}",
+            defs[0].raw_xml.contains("<label>x</label>"),
+            "sibling after empty defName must survive in raw_xml: {}",
+            defs[0].raw_xml
+        );
+        assert!(
+            check_well_formed(&defs[0].raw_xml, "raw").is_none(),
+            "reconstruction must stay well-formed: {}",
+            defs[0].raw_xml
+        );
+    }
+
+    #[test]
+    fn unclosed_defname_at_eof_drops_def() {
+        // FR-2d gate I-1: a second defName left open at EOF used to break out
+        // with a stale identity from the first defName sibling, so a kept def's
+        // raw_xml ended half-open (`<defName>`) with zero diagnostics.
+        let xml = r#"<Defs><ThingDef><defName>A</defName><defName>B"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(
+            defs.is_empty(),
+            "def with unclosed defName must be dropped: {:?}",
+            defs.iter()
+                .map(|d| (&d.def_name, &d.raw_xml))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            errors.iter().any(|e| e.contains("is not closed")),
+            "unclosed defName must be diagnosed: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn cdata_then_bad_entity_drops_def() {
+        // FR-2d gate I-2: a decode failure on a LATER text segment used to
+        // register the def under the earlier segment's partial identity
+        // ("ok") — a renamed ghost def is worse than a dropped one, since
+        // defName is the join key for cross-mod conflict detection.
+        let xml = r#"<Defs><ThingDef><defName><![CDATA[ok]]>&foo;</defName></ThingDef></Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(
+            defs.is_empty(),
+            "partial identity must not survive: {:?}",
             defs.iter().map(|d| &d.def_name).collect::<Vec<_>>()
         );
-        assert!(!defs.iter().any(|d| d.def_name.is_empty()));
+        assert!(
+            errors.iter().any(|e| e.contains("could not be decoded")),
+            "decode failure must be diagnosed: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nested_element_in_defname_drops_def() {
+        // FR-2d gate M-1: a non-matching End used to close the defName block
+        // early, fabricating a concatenated identity ("Ax") and later leaking
+        // the real </defName> into raw_xml as a duplicate close. defName is a
+        // leaf in RimWorld's schema: any nested markup poisons identity.
+        let xml = r#"<Defs><ThingDef><defName>A<b>x</b>&foo;</defName><label>y</label></ThingDef></Defs>"#;
+        let (defs, _s, _errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(
+            defs.is_empty(),
+            "non-leaf defName must drop the def, not fabricate an identity: {:?}",
+            defs.iter()
+                .map(|d| (&d.def_name, &d.raw_xml))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn every_returned_def_raw_xml_is_well_formed() {
+        // Reconstruction invariant behind all FR-2* fixes: replacement.rs
+        // re-parses raw_xml, so any kept def's reconstruction must itself be
+        // well-formed. Mix of plain, escaped, CDATA, and attributed content.
+        let xml = r#"<Defs>
+    <ThingDef Name="base"><defName>Steel</defName><label>a &lt; b</label></ThingDef>
+    <ThingDef><defName>Wood</defName><costList><li Name="x">1</li></costList><desc><![CDATA[raw <stuff>]]></desc></ThingDef>
+</Defs>"#;
+        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(defs.len(), 2);
+        for d in &defs {
+            if let Some(msg) = check_well_formed(&d.raw_xml, "raw") {
+                panic!("reconstruction not well-formed ({}): {msg}", d.def_name);
+            }
+        }
     }
 
     #[test]
