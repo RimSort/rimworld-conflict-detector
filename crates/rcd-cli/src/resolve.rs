@@ -223,17 +223,20 @@ mod tests {
                 .map(|d| &d.message)
                 .collect::<Vec<_>>()
         );
-        assert!(
-            resolved
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("Failed to parse mod"))
+        // Pin the PAIR by source, not by self-referential substrings: [0] is
+        // the discovery parse warning, [1] the not-found warning carrying the
+        // lowercased activeMods id (mods_config normalizes case).
+        assert_eq!(
+            resolved.diagnostics[0].source,
+            rcd_core::DiagnosticSource::FolderResolution
         );
-        assert!(
-            resolved
-                .diagnostics
-                .iter()
-                .any(|d| d.message.contains("may have failed to parse"))
+        assert_eq!(
+            resolved.diagnostics[1].source,
+            rcd_core::DiagnosticSource::MetadataResolution
+        );
+        assert_eq!(
+            resolved.diagnostics[1].affected_mod.as_deref(),
+            Some("brokenmod")
         );
     }
 

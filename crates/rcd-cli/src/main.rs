@@ -130,6 +130,14 @@ fn run_scan(
         }
     }
 
+    exit_code_for(&report)
+}
+
+/// Exit-code ladder, isolated for automated coverage: 2 (total resolution
+/// failure: no mods scanned AND diagnostics exist) beats 1 (conflict Errors)
+/// beats 3 (Error-severity diagnostics) beats 0 (clean). An empty scan with
+/// NO diagnostics (e.g. --dir on a nonexistent path, silent by design) is 0.
+fn exit_code_for(report: &rcd_core::Report) -> i32 {
     if report.metadata.mods_scanned.is_empty() && !report.diagnostics.is_empty() {
         2 // total resolution failure — machine-readable diagnostics already on stdout
     } else if report.has_errors() {
@@ -172,4 +180,104 @@ fn run_list_mods(
         output::format_mods_list(&resolved.mods, format, use_color)
     );
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcd_core::{
+        DefConflict, DefConflictMechanism, DefTarget, Diagnostic, DiagnosticSource, ModSummary,
+        Report,
+    };
+
+    fn summary(id: &str) -> ModSummary {
+        ModSummary {
+            package_id: id.into(),
+            name: id.into(),
+            author: None,
+            is_base_content: false,
+        }
+    }
+
+    fn diag(sev: Severity) -> Diagnostic {
+        Diagnostic {
+            affected_mod: None,
+            severity: sev,
+            message: "m".into(),
+            source: DiagnosticSource::MetadataResolution,
+        }
+    }
+
+    fn meta(mods: Vec<ModSummary>) -> ReportMetadata {
+        ReportMetadata {
+            timestamp: "t".into(),
+            game_version: None,
+            order_aware: false,
+            mods_scanned: mods,
+        }
+    }
+
+    fn error_conflict() -> rcd_core::Conflict {
+        rcd_core::Conflict::Def(DefConflict {
+            target: DefTarget {
+                def_type: "ThingDef".into(),
+                def_name: "A".into(),
+            },
+            mods: vec![summary("mod.a"), summary("mod.b")],
+            mechanism: DefConflictMechanism::DirectReplacement {
+                divergent_fields: vec!["label".into()],
+            },
+            winner: None,
+            condition: None,
+        })
+    }
+
+    #[test]
+    fn exit_ladder_all_four_arms() {
+        let clean = Report::build(
+            meta(vec![summary("mod.a")]),
+            vec![],
+            vec![diag(Severity::Warning)],
+        );
+        assert_eq!(exit_code_for(&clean), 0);
+
+        let conflict = Report::build(meta(vec![summary("mod.a")]), vec![error_conflict()], vec![]);
+        assert_eq!(exit_code_for(&conflict), 1);
+
+        let total = Report::build(meta(vec![]), vec![], vec![diag(Severity::Warning)]);
+        assert_eq!(exit_code_for(&total), 2);
+
+        let err_diag = Report::build(
+            meta(vec![summary("mod.a")]),
+            vec![],
+            vec![diag(Severity::Error)],
+        );
+        assert_eq!(exit_code_for(&err_diag), 3);
+    }
+
+    #[test]
+    fn exit_ladder_precedence() {
+        // 2 beats 1: empty mods + conflict Errors (conflicts on zero scanned
+        // mods is unreachable in practice, but the ladder must not depend on
+        // that assumption).
+        let two_beats_one = Report::build(
+            meta(vec![]),
+            vec![error_conflict()],
+            vec![diag(Severity::Error)],
+        );
+        assert_eq!(exit_code_for(&two_beats_one), 2);
+
+        // 1 beats 3: conflict Errors AND Error diagnostics → conflict wins.
+        let one_beats_three = Report::build(
+            meta(vec![summary("mod.a")]),
+            vec![error_conflict()],
+            vec![diag(Severity::Error)],
+        );
+        assert_eq!(exit_code_for(&one_beats_three), 1);
+
+        // Empty scan with NO diagnostics (nonexistent --dir, silent by design)
+        // is clean, not a "total failure".
+        let empty_clean = Report::build(meta(vec![]), vec![], vec![]);
+        assert_eq!(exit_code_for(&empty_clean), 0);
+    }
 }

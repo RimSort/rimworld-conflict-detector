@@ -328,9 +328,18 @@ fn parse_single_def(
         return None;
     }
 
-    // Skip abstract defs that don't have a defName
+    // Abstract defs without a defName are legitimate bases — the caller
+    // counts them as skipped. A concrete def with no defName is a defect:
+    // diagnose it, never drop it silently. (The poisoned path returned above
+    // with its own diagnostic; reaching here means the element was absent.)
     if is_abstract && def_name.is_none() {
         return None;
+    }
+    if def_name.is_none() {
+        errors.push(format!(
+            "def {} in {} has no defName; def dropped",
+            def_type, source
+        ));
     }
 
     let def_name = def_name?;
@@ -746,6 +755,22 @@ mod tests {
                 "leaf-violation drop must be diagnosed: {xml} errors={errors:?}"
             );
         }
+    }
+
+    #[test]
+    fn concrete_def_without_defname_is_diagnosed() {
+        // FR-2f gate P2: a CONCRETE def with no defName at all was the last
+        // silent return-None path in parse_single_def (abstract skips are
+        // counted by the caller; concrete drops were invisible).
+        let xml = r#"<Defs><ThingDef><label>x</label></ThingDef></Defs>"#;
+        let (defs, _skipped, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(defs.is_empty());
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("ThingDef") && e.contains("has no defName")),
+            "concrete def without defName must be diagnosed, not vanish: errors={errors:?}"
+        );
     }
 
     #[test]

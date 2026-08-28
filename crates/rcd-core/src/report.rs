@@ -169,6 +169,27 @@ mod tests {
         assert!(!r.has_error_diagnostics());
         let r = Report::build(meta(), vec![], vec![diag(crate::Severity::Error)]);
         assert!(r.has_error_diagnostics());
+
+        // Error-severity CONFLICTS must not leak into has_error_diagnostics:
+        // the two channels are independent (drives exit 1 vs exit 3).
+        let conflict_report = Report::build(
+            meta(),
+            vec![Conflict::Def(DefConflict {
+                target: DefTarget {
+                    def_type: "ThingDef".into(),
+                    def_name: "A".into(),
+                },
+                mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
+                mechanism: DefConflictMechanism::DirectReplacement {
+                    divergent_fields: vec!["label".into()],
+                },
+                winner: None,
+                condition: None,
+            })],
+            vec![diag(crate::Severity::Warning)],
+        );
+        assert!(conflict_report.has_errors());
+        assert!(!conflict_report.has_error_diagnostics());
     }
 
     #[test]
