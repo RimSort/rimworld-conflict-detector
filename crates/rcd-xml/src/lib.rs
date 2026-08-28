@@ -39,10 +39,13 @@ impl Detector for XmlDetector {
                 // Parse defs
                 let mut defs = Vec::new();
                 let mut abstract_skipped: usize = 0;
+                let mut unnamed: usize = 0;
                 for defs_path in &mod_data.defs_paths {
-                    let (parsed, skipped, io_errors) = def_parser::parse_defs_dir(defs_path);
+                    let (parsed, skipped, unnamed_n, io_errors) =
+                        def_parser::parse_defs_dir(defs_path);
                     defs.extend(parsed);
                     abstract_skipped += skipped;
+                    unnamed += unnamed_n;
                     for err_msg in io_errors {
                         diagnostics.push(Diagnostic {
                             affected_mod: Some(mod_summary.package_id.clone()),
@@ -63,6 +66,17 @@ impl Detector for XmlDetector {
                         message: format!(
                             "Skipped {} abstract def(s) without a usable defName",
                             abstract_skipped
+                        ),
+                        source: DiagnosticSource::XmlParsing,
+                    });
+                }
+                if unnamed > 0 {
+                    diagnostics.push(Diagnostic {
+                        affected_mod: Some(mod_summary.package_id.clone()),
+                        severity: Severity::Info,
+                        message: format!(
+                            "Skipped {} def(s) without defName (unindexable; RimWorld auto-names these at runtime)",
+                            unnamed
                         ),
                         source: DiagnosticSource::XmlParsing,
                     });
@@ -286,6 +300,68 @@ mod integration_tests {
         assert_eq!(
             abstract_diags[0].affected_mod.as_deref(),
             Some("test.abstract")
+        );
+    }
+
+    #[test]
+    fn unnamed_concrete_defs_emit_one_aggregated_info_diagnostic() {
+        // Vanilla Core/Royalty ship SongDefs without defName; a corpus run
+        // proved per-def Warnings on them are noise. The drop stays, the
+        // report aggregates to one Info per mod.
+        let xml_defs = r#"<?xml version="1.0" encoding="utf-8"?>
+<Defs>
+    <SongDef>
+        <clipPath>Songs/x</clipPath>
+    </SongDef>
+    <SongDef>
+        <clipPath>Songs/y</clipPath>
+    </SongDef>
+    <ThingDef>
+        <defName>Steel</defName>
+    </ThingDef>
+</Defs>"#;
+
+        let dir = tempfile::tempdir().unwrap();
+        let defs_dir = dir.path().join("Defs");
+        std::fs::create_dir_all(&defs_dir).unwrap();
+        std::fs::write(defs_dir.join("Songs.xml"), xml_defs).unwrap();
+
+        let m = rcd_core::Mod {
+            package_id: "test.unnamed".to_string(),
+            name: "Unnamed Test".to_string(),
+            author: None,
+            is_base_content: false,
+            root_path: dir.path().to_path_buf(),
+            supported_versions: vec![],
+            dependencies: vec![],
+            incompatibilities: vec![],
+            load_before: vec![],
+            load_after: vec![],
+            force_load_before: vec![],
+            force_load_after: vec![],
+            defs_paths: vec![defs_dir],
+            patches_paths: vec![],
+            assemblies_paths: vec![],
+        };
+
+        let detector = XmlDetector;
+        let (_conflicts, diagnostics) = detector.analyze(&[m], None);
+
+        let unnamed_diags: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.message.contains("without defName (unindexable"))
+            .collect();
+
+        assert_eq!(
+            unnamed_diags.len(),
+            1,
+            "one aggregated Info per mod: {diagnostics:?}"
+        );
+        assert_eq!(unnamed_diags[0].severity, Severity::Info);
+        assert!(unnamed_diags[0].message.contains("2 def(s)"));
+        assert_eq!(
+            unnamed_diags[0].affected_mod.as_deref(),
+            Some("test.unnamed")
         );
     }
 }

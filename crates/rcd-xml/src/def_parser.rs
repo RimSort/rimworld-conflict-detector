@@ -14,10 +14,11 @@ pub struct ParsedDef {
 
 /// Recursively walks a directory, parses all `.xml` files, and returns all defs found.
 ///
-/// Returns a tuple of (parsed defs, count of abstract defs without a usable defName that were skipped, I/O errors).
-pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, Vec<String>) {
+/// Returns a tuple of (parsed defs, count of abstract defs without a usable defName that were skipped, count of concrete defs without a defName that were dropped, I/O errors).
+pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, usize, Vec<String>) {
     let mut defs = Vec::new();
     let mut total_skipped: usize = 0;
+    let mut total_unnamed: usize = 0;
     let mut errors = Vec::new();
 
     for result in WalkDir::new(dir).into_iter() {
@@ -44,9 +45,11 @@ pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, Vec<String>) {
         match std::fs::read_to_string(path) {
             Ok(contents) => {
                 let source = path.to_string_lossy().to_string();
-                let (parsed, skipped, xml_errors) = parse_defs_from_xml(&contents, &source);
+                let (parsed, skipped, unnamed, xml_errors) =
+                    parse_defs_from_xml(&contents, &source);
                 defs.extend(parsed);
                 total_skipped += skipped;
+                total_unnamed += unnamed;
                 errors.extend(xml_errors);
             }
             Err(e) => {
@@ -55,7 +58,7 @@ pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, Vec<String>) {
         }
     }
 
-    (defs, total_skipped, errors)
+    (defs, total_skipped, total_unnamed, errors)
 }
 
 /// One-event-per-line scan that guarantees a diagnostic for any malformed
@@ -104,10 +107,14 @@ pub(crate) fn check_well_formed(xml: &str, source: &str) -> Option<String> {
 /// drop is diagnosed in the returned errors (a poisoned ABSTRACT def also
 /// surfaces in `abstract_skipped`, whose count conflates the two causes).
 ///
-/// Returns a tuple of (parsed defs, count of abstract defs without a usable defName that were skipped, parse errors).
-pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, Vec<String>) {
+/// Concrete defs with no defName at all are counted in the third tuple
+/// element; the caller aggregates them into one Info diagnostic per mod.
+///
+/// Returns a tuple of (parsed defs, count of abstract defs without a usable defName that were skipped, count of concrete defs without a defName that were dropped, parse errors).
+pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, usize, Vec<String>) {
     let mut defs = Vec::new();
     let mut abstract_skipped: usize = 0;
+    let mut unnamed: usize = 0;
     let mut errors: Vec<String> = Vec::new();
     if let Some(msg) = check_well_formed(xml, source) {
         errors.push(msg);
@@ -137,8 +144,14 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, V
                     });
 
                     // Collect the entire def element's inner content
-                    match parse_single_def(&mut reader, &tag_name, is_abstract, source, &mut errors)
-                    {
+                    match parse_single_def(
+                        &mut reader,
+                        &tag_name,
+                        is_abstract,
+                        source,
+                        &mut errors,
+                        &mut unnamed,
+                    ) {
                         Some(parsed) => defs.push(parsed),
                         None if is_abstract => abstract_skipped += 1,
                         None => {}
@@ -169,7 +182,7 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, V
     errors.sort();
     errors.dedup();
 
-    (defs, abstract_skipped, errors)
+    (defs, abstract_skipped, unnamed, errors)
 }
 
 /// Parses a single def element that we've already seen the opening tag for.
@@ -183,6 +196,7 @@ fn parse_single_def(
     is_abstract: bool,
     source: &str,
     errors: &mut Vec<String>,
+    unnamed: &mut usize,
 ) -> Option<ParsedDef> {
     let mut def_name: Option<String> = None;
     // Set when the defName identity is untrustworthy (see defName block below).
@@ -372,10 +386,7 @@ fn parse_single_def(
         return None;
     }
     if def_name.is_none() {
-        errors.push(format!(
-            "def {} in {} has no defName; def dropped",
-            def_type, source
-        ));
+        *unnamed += 1;
     }
 
     let def_name = def_name?;
@@ -429,7 +440,7 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let (defs, _, errors) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _, _, errors) = parse_defs_from_xml(xml, "test.xml");
         assert!(errors.is_empty());
         assert_eq!(defs.len(), 2);
 
@@ -464,7 +475,7 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let (defs, _, _) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _, _, _) = parse_defs_from_xml(xml, "test.xml");
         // Abstract without defName is skipped; abstract WITH defName is kept;
         // non-abstract with defName is kept.
         assert_eq!(defs.len(), 2);
@@ -486,7 +497,7 @@ mod tests {
     </RecipeDef>
 </Defs>"#;
 
-        let (defs, _, _) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _, _, _) = parse_defs_from_xml(xml, "test.xml");
         assert_eq!(defs.len(), 2);
 
         assert_eq!(defs[0].def_type, "ThingDef");
@@ -506,7 +517,7 @@ mod tests {
             .join("tests/fixtures/mods/mod_core/Defs");
 
         if fixtures.exists() {
-            let (defs, _, _errors) = parse_defs_dir(&fixtures);
+            let (defs, _, _, _errors) = parse_defs_dir(&fixtures);
             assert!(defs.len() >= 2, "Expected at least Steel and Wood defs");
 
             let steel = defs.iter().find(|d| d.def_name == "Steel");
@@ -529,7 +540,7 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let (defs, _, _) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _, _, _) = parse_defs_from_xml(xml, "test.xml");
         // "SomeRandomElement" doesn't end with "Def", so it should be skipped
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].def_name, "Steel");
@@ -554,7 +565,7 @@ mod tests {
     </ThingDef>
 </Defs>"#;
 
-        let (defs, skipped, _) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, skipped, _, _) = parse_defs_from_xml(xml, "test.xml");
         assert_eq!(defs.len(), 2, "Steel + HasName");
         assert_eq!(skipped, 2, "Two abstract defs without defName were skipped");
     }
@@ -570,7 +581,7 @@ mod tests {
         )
         .unwrap();
 
-        let (defs, skipped, errors) = parse_defs_dir(defs_dir.as_path());
+        let (defs, skipped, _, errors) = parse_defs_dir(defs_dir.as_path());
         assert_eq!(defs.len(), 1);
         assert_eq!(skipped, 0);
         assert!(errors.is_empty());
@@ -585,7 +596,7 @@ mod tests {
     <ThingDef><defName>Good</defName></ThingDef>
     <ThingDef"#;
 
-        let (defs, _skipped, errors) = parse_defs_from_xml(xml, "test.xml");
+        let (defs, _skipped, _, errors) = parse_defs_from_xml(xml, "test.xml");
         assert!(
             defs.iter().any(|d| d.def_name == "Good"),
             "valid def before the error should be kept"
@@ -599,7 +610,7 @@ mod tests {
         // quick-xml latches on this error inside nested best-effort reads, so the
         // structural parser alone reports nothing; the pre-check must catch it.
         let xml = r#"<Defs><ThingDef><defName><![CDATA[Steel</defName><label>x</label></ThingDef></Defs>"#;
-        let (_defs, _skipped, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (_defs, _skipped, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(
             !errors.is_empty(),
             "pre-check must surface the malformed document"
@@ -611,7 +622,7 @@ mod tests {
     fn escaped_entities_survive_raw_xml_reconstruction() {
         let xml =
             r#"<Defs><ThingDef><defName>Steel</defName><label>a &lt; b</label></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty());
         assert_eq!(defs[0].def_name, "Steel");
         assert!(
@@ -625,7 +636,7 @@ mod tests {
     fn defname_identity_decoded_but_raw_xml_keeps_escaping() {
         let xml =
             r#"<Defs><ThingDef><defName>a &lt; b</defName><label>x</label></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(defs[0].def_name, "a < b", "identity must be decoded");
         assert!(
@@ -642,7 +653,7 @@ mod tests {
         // partial identity. The discriminating multi-segment case is
         // cdata_then_bad_entity_drops_def.
         let xml = r#"<Defs><ThingDef><defName>bad &foo; entity</defName></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(defs.is_empty());
         assert!(
             errors.iter().any(|e| e.contains("could not be decoded")),
@@ -653,7 +664,7 @@ mod tests {
     #[test]
     fn cdata_content_survives_raw_xml_reconstruction() {
         let xml = r#"<Defs><ThingDef><defName>Steel</defName><label><![CDATA[a < b]]></label></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty(), "{errors:?}");
         assert!(
             defs[0].raw_xml.contains("<![CDATA[a < b]]>"),
@@ -671,7 +682,7 @@ mod tests {
     #[test]
     fn cdata_defname_resolves_and_survives_reconstruction() {
         let xml = r#"<Defs><ThingDef><defName><![CDATA[Steel]]></defName><label>x</label></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].def_name, "Steel");
@@ -694,7 +705,7 @@ mod tests {
         // Here the def keeps identity from the FIRST defName; the empty second
         // one must consume its own End and leave <label> intact.
         let xml = r#"<Defs><ThingDef><defName>A</defName><defName></defName><label>x</label></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].def_name, "A");
@@ -716,7 +727,7 @@ mod tests {
         // with a stale identity from the first defName sibling, so a kept def's
         // raw_xml ended half-open (`<defName>`) with zero diagnostics.
         let xml = r#"<Defs><ThingDef><defName>A</defName><defName>B"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(
             defs.is_empty(),
             "def with unclosed defName must be dropped: {:?}",
@@ -737,7 +748,7 @@ mod tests {
         // ("ok") — a renamed ghost def is worse than a dropped one, since
         // defName is the join key for cross-mod conflict detection.
         let xml = r#"<Defs><ThingDef><defName><![CDATA[ok]]>&foo;</defName></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(
             defs.is_empty(),
             "partial identity must not survive: {:?}",
@@ -756,7 +767,7 @@ mod tests {
         // the real </defName> into raw_xml as a duplicate close. defName is a
         // leaf in RimWorld's schema: any nested markup poisons identity.
         let xml = r#"<Defs><ThingDef><defName>A<b>x</b>&foo;</defName><label>y</label></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(
             defs.is_empty(),
             "non-leaf defName must drop the def, not fabricate an identity: {:?}",
@@ -789,7 +800,7 @@ mod tests {
         // VISIBILITY: the depth diagnostic attributes any resulting conflict
         // to the truncated source file).
         let xml = r#"<Defs><ThingDef><defName>Steel</defName>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(
             errors.iter().any(|e| e.contains("unclosed element")),
             "pre-check must catch depth-at-Eof: {errors:?}"
@@ -815,7 +826,7 @@ mod tests {
         // UNGUARDED, so a nested-markup poison followed by EOF diagnosed the
         // same drop twice — the second message misattributing the cause.
         let xml = r#"<Defs><ThingDef><defName>A<b>x"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(defs.is_empty(), "poisoned identity must drop the def");
         // Scoped to drop-reason texts: the depth pre-check legitimately adds
         // its own unrelated "unclosed element(s)" message.
@@ -845,7 +856,7 @@ mod tests {
             r#"<Defs><ThingDef><defName><v/></defName></ThingDef></Defs>"#,
             r#"<Defs><ThingDef><defName>A<b>x</b></defName></ThingDef></Defs>"#,
         ] {
-            let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+            let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
             assert!(defs.is_empty(), "{xml}");
             assert!(
                 errors.iter().any(|e| e.contains("nested markup")),
@@ -855,18 +866,19 @@ mod tests {
     }
 
     #[test]
-    fn concrete_def_without_defname_is_diagnosed() {
-        // FR-2f gate P2: a CONCRETE def with no defName at all was the last
-        // silent return-None path in parse_single_def (abstract skips are
-        // counted by the caller; concrete drops were invisible).
+    fn concrete_def_without_defname_is_counted_not_warned() {
+        // A corpus run over 1573 workshop mods proved the old per-def
+        // Warning fired on VANILLA content (Core/Royalty SongDefs): RimWorld
+        // auto-names defName-less defs at runtime, so they are legitimate.
+        // The drop stays (nameless defs are unindexable) but the count now
+        // feeds one aggregated Info diagnostic per mod at the detector level.
         let xml = r#"<Defs><ThingDef><label>x</label></ThingDef></Defs>"#;
-        let (defs, _skipped, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _skipped, unnamed, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(defs.is_empty());
+        assert_eq!(unnamed, 1);
         assert!(
-            errors
-                .iter()
-                .any(|e| e.contains("ThingDef") && e.contains("has no defName")),
-            "concrete def without defName must be diagnosed, not vanish: errors={errors:?}"
+            errors.is_empty(),
+            "nameless concrete defs are legitimate, not errors: {errors:?}"
         );
     }
 
@@ -875,7 +887,7 @@ mod tests {
         // RimWorld mods really write this. Comments carry no element content:
         // skip them, keep the def, identity from the remaining text.
         let xml = r#"<Defs><ThingDef><defName> <!-- legacy --> Steel</defName><label>x</label></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(defs.len(), 1);
         assert_eq!(defs[0].def_name, "Steel");
@@ -895,7 +907,7 @@ mod tests {
     <ThingDef Name="base"><defName>Steel</defName><label>a &lt; b</label></ThingDef>
     <ThingDef><defName>Wood</defName><costList><li Name="x">1</li></costList><desc><![CDATA[raw <stuff>]]></desc></ThingDef>
 </Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty(), "{errors:?}");
         assert_eq!(defs.len(), 2);
         for d in &defs {
@@ -910,7 +922,7 @@ mod tests {
         // Source Name='a "b"' → raw bytes contain a literal quote; re-emitting
         // into double quotes without escaping produces malformed XML.
         let xml = r#"<Defs><ThingDef><defName>Steel</defName><costList><li Name='a "b"'>x</li></costList></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty(), "{errors:?}");
         assert!(
             defs[0].raw_xml.contains(r#"Name="a &quot;b&quot;"#),
@@ -925,7 +937,7 @@ mod tests {
         // tags drop their attributes entirely (`<{{def_type}}>` reconstruction) —
         // that's the separate tracked P0 item, out of scope here.
         let xml = r#"<Defs><ThingDef><defName>Steel</defName><costList><li Name="a &lt; b">x</li></costList></ThingDef></Defs>"#;
-        let (defs, _s, errors) = parse_defs_from_xml(xml, "t.xml");
+        let (defs, _s, _, errors) = parse_defs_from_xml(xml, "t.xml");
         assert!(errors.is_empty(), "{errors:?}");
         assert!(
             defs[0].raw_xml.contains(r#"Name="a &lt; b""#),

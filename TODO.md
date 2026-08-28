@@ -107,7 +107,7 @@ Items surfaced by the final cross-commit review and its gate reviews, deliberate
 - [ ] **Comment/PI not re-emitted into `raw_xml`** — def_parser skips them from the reconstruction (matches pre-existing outer-loop behavior; only affects byte-fidelity of raw_xml, not identity).
 - [ ] **T1 manual-scan Err-arm test seam** — the `catch_unwind` Err→Warning arm in HarmonyDetector is verified by inspection only; a crash fixture was declined as YAGNI.
 - [ ] **`list-mods --format json` total failure is stderr-only** — scoped out of I-1 (scan-only); a machine consumer of list-mods still can't see resolution diagnostics.
-- [ ] **Concrete-def-no-defName diagnostic may need a config-file escape hatch** — mods shipping nameless concrete defs will now emit one warning per def (FR-2f reviewer note; acceptable today).
+- [x] **Concrete-def-no-defName diagnostic may need a config-file escape hatch** — resolved by aggregation: a corpus run over 1573 workshop mods showed the per-def Warning firing on vanilla Core/Royalty SongDefs (legitimate — RimWorld auto-names defName-less defs at runtime). Nameless concrete defs now aggregate into one Info diagnostic per mod, matching the abstract-skip convention; no escape hatch needed.
 
 ## Deferred Features (from spec)
 
