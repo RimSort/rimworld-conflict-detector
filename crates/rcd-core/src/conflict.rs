@@ -28,6 +28,9 @@ pub enum DefConflictMechanism {
         xpath: String,
         replaced_by: String,
     },
+    XPathSameDefNonOverlap {
+        xpath_pairs: Vec<(String, String)>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +103,7 @@ impl Conflict {
                     }
                 }
                 DefConflictMechanism::XPathOnReplacedDef { .. } => Severity::Error,
+                DefConflictMechanism::XPathSameDefNonOverlap { .. } => Severity::Info,
             },
             Conflict::Harmony(hc) => {
                 let kinds: Vec<_> = hc.patches.iter().map(|p| p.patch_kind).collect();
@@ -211,6 +215,23 @@ mod tests {
             condition: None,
         });
         assert_eq!(c.severity(), Severity::Error);
+    }
+
+    #[test]
+    fn same_def_non_overlapping_xpaths_are_info() {
+        let c = Conflict::Def(DefConflict {
+            target: DefTarget {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+            },
+            mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
+            mechanism: DefConflictMechanism::XPathSameDefNonOverlap {
+                xpath_pairs: vec![("path/a".into(), "path/b".into())],
+            },
+            winner: None,
+            condition: None,
+        });
+        assert_eq!(c.severity(), Severity::Info);
     }
 
     #[test]

@@ -257,6 +257,9 @@ fn format_conflict(conflict: &Conflict, use_color: bool) -> String {
                 DefConflictMechanism::XPathOnReplacedDef { replaced_by, .. } => {
                     format!("XPath patch on def replaced by {}", replaced_by)
                 }
+                DefConflictMechanism::XPathSameDefNonOverlap { .. } => {
+                    "same def, non-overlapping XPath patches".to_string()
+                }
             };
             out.push_str(&format!(
                 "[{}] {} — {}\n",
