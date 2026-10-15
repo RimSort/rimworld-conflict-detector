@@ -94,10 +94,12 @@ non-JSON stderr text. The command retains its existing exit codes.
 When a mod has `LoadFolders.xml`, folder selection uses the requested game
 version (revision suffixes are normalized); for `--dir` and `--mods`, the
 supplied mods form the active set, while `--config` uses the configured active
-mods. If `LoadFolders.xml` cannot be parsed or no applicable version entry is
-selectable, resolution warns and falls back to implicit versioned/Common folder
-selection. A selected entry that intentionally lists no content folders stays
-empty. Game version 1.0 uses implicit folder resolution.
+mods. For the requested version, selection prefers an exact entry, then the
+greatest lower version entry; if neither applies, it uses `default` when present.
+A malformed `LoadFolders.xml`, or the absence of both an applicable version
+entry and a `default` entry, warns and falls back to implicit versioned/Common
+folder selection. A selected entry that intentionally lists no content folders
+stays empty. Game version 1.0 uses implicit folder resolution.
 
 Patch analysis is static: `PatchOperationSequence` operations are treated as
 executing, and the sequence's `success` branch behavior is not evaluated.
