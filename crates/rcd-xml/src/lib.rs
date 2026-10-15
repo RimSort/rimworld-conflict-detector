@@ -36,28 +36,29 @@ impl Detector for XmlDetector {
                 let mod_summary = ModSummary::from(mod_data);
                 let mut diagnostics = Vec::new();
 
-                // Parse defs
-                let mut defs = Vec::new();
-                let mut abstract_skipped: usize = 0;
-                let mut unnamed: usize = 0;
-                for defs_path in &mod_data.defs_paths {
-                    let (parsed, skipped, unnamed_n, io_errors) =
-                        def_parser::parse_defs_dir(defs_path);
-                    defs.extend(parsed);
-                    abstract_skipped += skipped;
-                    unnamed += unnamed_n;
-                    for err_msg in io_errors {
-                        diagnostics.push(Diagnostic {
-                            affected_mod: Some(mod_summary.package_id.clone()),
-                            severity: Severity::Warning,
-                            message: err_msg,
-                            source: DiagnosticSource::XmlParsing,
-                        });
-                    }
+                // Parse all roots together so first-wins file precedence spans
+                // the complete LoadFolders priority list.
+                let (defs, abstract_skipped, unnamed, io_errors) =
+                    def_parser::parse_defs_dirs(&mod_data.defs_paths);
+                for err_msg in io_errors {
+                    diagnostics.push(Diagnostic {
+                        affected_mod: Some(mod_summary.package_id.clone()),
+                        severity: Severity::Warning,
+                        message: err_msg,
+                        source: DiagnosticSource::XmlParsing,
+                    });
                 }
 
-                // Parse patches
-                let mut patches = Vec::new();
+                let (patches, patch_errors) =
+                    patch_ops::parse_patches_dirs(&mod_data.patches_paths);
+                for err_msg in patch_errors {
+                    diagnostics.push(Diagnostic {
+                        affected_mod: Some(mod_summary.package_id.clone()),
+                        severity: Severity::Warning,
+                        message: err_msg,
+                        source: DiagnosticSource::XmlParsing,
+                    });
+                }
 
                 if abstract_skipped > 0 {
                     diagnostics.push(Diagnostic {
@@ -81,19 +82,6 @@ impl Detector for XmlDetector {
                         source: DiagnosticSource::XmlParsing,
                     });
                 }
-                for patches_path in &mod_data.patches_paths {
-                    let (parsed_patches, io_errors) = patch_ops::parse_patches_dir(patches_path);
-                    patches.extend(parsed_patches);
-                    for err_msg in io_errors {
-                        diagnostics.push(Diagnostic {
-                            affected_mod: Some(mod_summary.package_id.clone()),
-                            severity: Severity::Warning,
-                            message: err_msg,
-                            source: DiagnosticSource::XmlParsing,
-                        });
-                    }
-                }
-
                 (mod_summary, defs, patches, diagnostics)
             })
             .collect();
@@ -186,6 +174,145 @@ mod integration_tests {
         assert!(
             !errors.is_empty(),
             "Should detect ThingDef:Steel replacement conflict"
+        );
+    }
+
+    #[test]
+    fn detector_applies_defs_overlay_across_all_mod_paths() {
+        use rcd_core::Mod;
+
+        let temp = tempfile::tempdir().unwrap();
+        let high = temp.path().join("high");
+        let low = temp.path().join("low");
+        let peer = temp.path().join("peer");
+        let high_patches = temp.path().join("high_patches");
+        let low_patches = temp.path().join("low_patches");
+        let peer_patches = temp.path().join("peer_patches");
+        for root in [
+            &high,
+            &low,
+            &peer,
+            &high_patches,
+            &low_patches,
+            &peer_patches,
+        ] {
+            std::fs::create_dir_all(root).unwrap();
+        }
+        std::fs::write(
+            high.join("same.xml"),
+            "<Defs><ThingDef><defName>High</defName><label>high</label></ThingDef></Defs>",
+        )
+        .unwrap();
+        std::fs::write(
+            low.join("same.xml"),
+            "<Defs><ThingDef><defName>Low</defName><label>low</label></ThingDef></Defs>",
+        )
+        .unwrap();
+        std::fs::write(
+            low.join("unique.xml"),
+            "<Defs><ThingDef><defName>Unique</defName><label>low unique</label></ThingDef></Defs>",
+        )
+        .unwrap();
+        std::fs::write(
+            peer.join("peer.xml"),
+            "<Defs><ThingDef><defName>Low</defName><label>peer</label></ThingDef><ThingDef><defName>Unique</defName><label>peer</label></ThingDef></Defs>",
+        )
+        .unwrap();
+        std::fs::write(
+            high_patches.join("same.xml"),
+            r#"<Patch><Operation Class="PatchOperationReplace"><xpath>Defs/ThingDef[defName="HighPatch"]</xpath></Operation></Patch>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            low_patches.join("same.xml"),
+            r#"<Patch><Operation Class="PatchOperationReplace"><xpath>Defs/ThingDef[defName="LowPatch"]</xpath></Operation></Patch>"#,
+        )
+        .unwrap();
+        std::fs::create_dir_all(low_patches.join("nested")).unwrap();
+        std::fs::write(
+            low_patches.join("nested/unique.xml"),
+            r#"<Patch><Operation Class="PatchOperationReplace"><xpath>Defs/ThingDef[defName="UniquePatch"]</xpath></Operation></Patch>"#,
+        )
+        .unwrap();
+        std::fs::write(
+            peer_patches.join("peer.xml"),
+            r#"<Patch><Operation Class="PatchOperationReplace"><xpath>Defs/ThingDef[defName="LowPatch"]</xpath></Operation><Operation Class="PatchOperationReplace"><xpath>Defs/ThingDef[defName="UniquePatch"]</xpath></Operation></Patch>"#,
+        )
+        .unwrap();
+
+        let make_mod = |package_id: &str,
+                        name: &str,
+                        paths: Vec<std::path::PathBuf>,
+                        patches: Vec<std::path::PathBuf>| Mod {
+            package_id: package_id.to_string(),
+            name: name.to_string(),
+            author: None,
+            is_base_content: false,
+            root_path: temp.path().to_path_buf(),
+            supported_versions: vec![],
+            dependencies: vec![],
+            incompatibilities: vec![],
+            load_before: vec![],
+            load_after: vec![],
+            force_load_before: vec![],
+            force_load_after: vec![],
+            defs_paths: paths,
+            patches_paths: patches,
+            assemblies_paths: vec![],
+        };
+        let mods = vec![
+            make_mod(
+                "test.overlay",
+                "Overlay",
+                vec![high, low],
+                vec![high_patches, low_patches],
+            ),
+            make_mod("test.peer", "Peer", vec![peer], vec![peer_patches]),
+        ];
+
+        let (conflicts, diagnostics) = XmlDetector.analyze(&mods, None);
+        assert!(
+            diagnostics.is_empty(),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+        let targets: Vec<_> = conflicts
+            .iter()
+            .filter_map(|conflict| match conflict {
+                Conflict::Def(def)
+                    if matches!(
+                        def.mechanism,
+                        rcd_core::DefConflictMechanism::DirectReplacement { .. }
+                    ) =>
+                {
+                    Some((def.target.def_type.clone(), def.target.def_name.clone()))
+                }
+                Conflict::Def(_) => None,
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            targets,
+            vec![("ThingDef".to_string(), "Unique".to_string())],
+            "only the unique lower-priority def file should remain visible"
+        );
+        let xpath_targets: Vec<_> = conflicts
+            .iter()
+            .filter_map(|conflict| match conflict {
+                Conflict::Def(def)
+                    if matches!(
+                        def.mechanism,
+                        rcd_core::DefConflictMechanism::XPathOverlap { .. }
+                    ) =>
+                {
+                    Some(def.target.def_name.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            xpath_targets,
+            vec!["UniquePatch"],
+            "duplicate lower-priority patch must be excluded while its unique nested file remains visible"
         );
     }
 
