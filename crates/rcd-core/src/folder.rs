@@ -1,15 +1,7 @@
 use crate::about_xml::parse_about_xml;
-use crate::load_folders::{LoadFolders, ModIdentity};
+use crate::load_folders::{LoadFolders, ModIdentity, normalize_game_version};
 use crate::types::{Mod, ModSummary};
 use std::path::{Path, PathBuf};
-
-fn is_valid_game_version(v: &str) -> bool {
-    let parts: Vec<&str> = v.split('.').collect();
-    parts.len() == 2
-        && parts
-            .iter()
-            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-}
 
 /// Compatibility resolver for callers that cannot consume folder diagnostics.
 /// New resolution paths should use `resolve_mod_folders_with_active`.
@@ -35,7 +27,8 @@ pub fn resolve_mod_folders_with_active(
         })
         .collect::<Vec<_>>();
     let mut diagnostics = Vec::new();
-    if let Some(path) = find_load_folders(&m.root_path) {
+    let is_version_1_0 = game_version.and_then(normalize_game_version) == Some((1, 0));
+    if !is_version_1_0 && let Some(path) = find_load_folders(&m.root_path) {
         let parsed = LoadFolders::parse_file(&path);
         let selection = match &parsed {
             Ok(folders) => folders.select(game_version, &active),
@@ -124,13 +117,15 @@ fn add_content_dirs(m: &mut Mod, relative: &Path) {
 
 fn resolve_implicit_folders(m: &mut Mod, game_version: Option<&str>) {
     clear_paths(m);
-    let version = game_version.filter(|v| is_valid_game_version(v));
+    let version = game_version
+        .and_then(normalize_game_version)
+        .map(|(major, minor)| format!("{major}.{minor}"));
     for (folder, paths) in [
         ("Defs", &mut m.defs_paths),
         ("Patches", &mut m.patches_paths),
         ("Assemblies", &mut m.assemblies_paths),
     ] {
-        if let Some(version) = version {
+        if let Some(version) = &version {
             let path = m.root_path.join(version).join(folder);
             if path.is_dir() {
                 paths.push(path);
@@ -337,6 +332,51 @@ mod tests {
             assert_eq!(diagnostics.len(), 1);
             assert_eq!(diagnostics[0].affected_mod.as_deref(), Some("example.mod"));
             assert_eq!(m.defs_paths.is_empty(), expected_empty);
+        }
+    }
+
+    #[test]
+    fn game_version_1_0_uses_implicit_folders_even_with_loadfolders() {
+        for version in ["1.0.2654", "1.0.2654 rev44"] {
+            let root = tempfile::tempdir().unwrap();
+            let mod_path = write_mod(
+                root.path(),
+                "mod",
+                "example.mod",
+                "Example",
+                Some("<loadFolders><v1.0><li>Custom</li></v1.0></loadFolders>"),
+            );
+            std::fs::create_dir_all(mod_path.join("Custom/Defs")).unwrap();
+            std::fs::create_dir_all(mod_path.join("Defs")).unwrap();
+            let mut m = parse_about_xml(&mod_path).unwrap();
+            let diagnostics = resolve_mod_folders_with_active(&mut m, Some(version), &[]);
+            assert!(diagnostics.is_empty());
+            assert_eq!(m.defs_paths, [mod_path.join("Defs")], "version {version}");
+        }
+    }
+
+    #[test]
+    fn implicit_version_paths_use_loadfolders_normalization() {
+        for version in ["1.7.4976", "1.7.4976 rev44"] {
+            for load_folders in [None, Some("<loadFolders><v1.7><li>Broken")] {
+                let root = tempfile::tempdir().unwrap();
+                let mod_path =
+                    write_mod(root.path(), "mod", "example.mod", "Example", load_folders);
+                std::fs::create_dir_all(mod_path.join("1.7/Defs")).unwrap();
+                let mut m = parse_about_xml(&mod_path).unwrap();
+                let diagnostics = resolve_mod_folders_with_active(&mut m, Some(version), &[]);
+                if load_folders.is_some() {
+                    assert_eq!(diagnostics.len(), 1);
+                } else {
+                    assert!(diagnostics.is_empty());
+                }
+                assert!(
+                    m.defs_paths
+                        .iter()
+                        .any(|path| path == &mod_path.join("1.7/Defs")),
+                    "version {version}"
+                );
+            }
         }
     }
 

@@ -302,7 +302,8 @@ fn append_entry(folders: &mut LoadFolders, version: &str, entry: LoadFolderEntry
         }
     }
 }
-fn normalize_game_version(version: &str) -> Option<(u32, u32)> {
+/// Normalize an accepted game-version string to its major/minor directory version.
+pub fn normalize_game_version(version: &str) -> Option<(u32, u32)> {
     let core = version.trim();
     let core = core.split_once(" rev").map_or(core, |(v, rev)| {
         if !rev.is_empty() && rev.chars().all(|c| c.is_ascii_digit()) {
