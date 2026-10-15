@@ -113,6 +113,8 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
     let mut root_closed = false;
     let mut current_version: Option<String> = None;
     let mut current_entry: Option<LoadFolderEntry> = None;
+    let mut current_entry_element: Option<String> = None;
+    let mut entry_depth = 0usize;
     let mut text = String::new();
     let mut result = LoadFolders::default();
     loop {
@@ -128,7 +130,7 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                     }
                     in_root = true;
                 } else if current_entry.is_some() {
-                    // Folder elements are expected to contain text only; nested markup is still parsed.
+                    entry_depth += 1;
                 } else if let Some(version) = name.strip_prefix('v') {
                     if normalize_game_version(version).is_some() {
                         current_version = Some(version.to_owned());
@@ -142,6 +144,9 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                             &reader,
                             &mut result.unknown_conditions,
                         )?);
+                        current_entry_element =
+                            Some(String::from_utf8_lossy(start.local_name().as_ref()).into_owned());
+                        entry_depth = 1;
                         text.clear();
                     }
                 } else if name == "default" {
@@ -153,6 +158,9 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                         &reader,
                         &mut result.unknown_conditions,
                     )?);
+                    current_entry_element =
+                        Some(String::from_utf8_lossy(start.local_name().as_ref()).into_owned());
+                    entry_depth = 1;
                     text.clear();
                 }
             }
@@ -190,13 +198,24 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                 text.push_str(&String::from_utf8_lossy(&value))
             }
             Event::End(end) => {
-                let name = String::from_utf8_lossy(end.local_name().as_ref()).to_lowercase();
-                if let Some(mut entry) = current_entry.take() {
-                    entry.path = text.clone();
-                    if let Some(version) = current_version.as_deref() {
-                        append_entry(&mut result, version, entry);
+                let local_name = String::from_utf8_lossy(end.local_name().as_ref()).into_owned();
+                let name = local_name.to_lowercase();
+                if current_entry.is_some() {
+                    if entry_depth > 1 {
+                        entry_depth -= 1;
+                    } else if current_entry_element
+                        .as_deref()
+                        .is_some_and(|tag| tag == local_name.as_str())
+                    {
+                        let mut entry = current_entry.take().unwrap();
+                        current_entry_element = None;
+                        entry_depth = 0;
+                        entry.path = text.clone();
+                        if let Some(version) = current_version.as_deref() {
+                            append_entry(&mut result, version, entry);
+                        }
+                        text.clear();
                     }
-                    text.clear();
                 } else if name == "default"
                     || (name.starts_with('v')
                         && current_version
@@ -391,14 +410,15 @@ fn validate_folder_path(text: &str) -> Result<PathBuf, ()> {
 }
 fn identity_matches(wanted: &str, candidate: &ModIdentity) -> bool {
     let wanted = wanted.trim();
-    let equivalent = |a: &str, b: &str| {
-        a.eq_ignore_ascii_case(b)
-            || a.strip_suffix("_steam")
-                .is_some_and(|s| s.eq_ignore_ascii_case(b))
-            || b.strip_suffix("_steam")
-                .is_some_and(|s| s.eq_ignore_ascii_case(a))
-    };
-    equivalent(wanted, &candidate.package_id) || equivalent(wanted, &candidate.display_name)
+    let package_id_matches = wanted.eq_ignore_ascii_case(&candidate.package_id)
+        || wanted
+            .strip_suffix("_steam")
+            .is_some_and(|id| id.eq_ignore_ascii_case(&candidate.package_id))
+        || candidate
+            .package_id
+            .strip_suffix("_steam")
+            .is_some_and(|id| id.eq_ignore_ascii_case(wanted));
+    package_id_matches || wanted.eq_ignore_ascii_case(&candidate.display_name)
 }
 
 #[cfg(test)]
@@ -465,6 +485,40 @@ mod tests {
                 .map(|e| e.path.as_str())
                 .collect::<Vec<_>>(),
             ["ok"]
+        );
+    }
+
+    #[test]
+    fn steam_suffix_tolerance_applies_only_to_package_ids() {
+        let parsed = LoadFolders::parse_str(
+            "<loadFolders><v1.5><li IfModActive=\"Acme.Core\">package-id</li><li IfModActive=\"Core Mod_steam\">display-name</li></v1.5></loadFolders>",
+        )
+        .unwrap();
+        let selected = parsed.select(Some("1.5"), &mods());
+        assert_eq!(
+            selected
+                .entries
+                .unwrap()
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["package-id"]
+        );
+    }
+
+    #[test]
+    fn nested_folder_text_is_preserved_and_following_sibling_is_intact() {
+        let parsed = LoadFolders::parse_str(
+            "<loadFolders><v1.5><li>one<b>two</b>three</li><folder>sibling</folder></v1.5></loadFolders>",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.version_entries[0]
+                .1
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["onetwothree", "sibling"]
         );
     }
 
