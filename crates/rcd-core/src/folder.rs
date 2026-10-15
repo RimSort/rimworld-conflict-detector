@@ -18,47 +18,61 @@ pub fn resolve_mod_folders_with_active(
         .collect::<Vec<_>>();
     let mut diagnostics = Vec::new();
     let is_version_1_0 = game_version.and_then(normalize_game_version) == Some((1, 0));
-    if !is_version_1_0 && let Some(path) = find_load_folders(&m.root_path) {
-        let parsed = LoadFolders::parse_file(&path);
-        let selection = match &parsed {
-            Ok(folders) => folders.select(game_version, &active),
-            Err(error) => crate::load_folders::FolderSelection {
-                entries: None,
-                diagnostic: Some(crate::Diagnostic {
-                    affected_mod: None,
-                    severity: crate::Severity::Warning,
-                    message: format!(
-                        "Failed to parse LoadFolders.xml; using implicit folder resolution: {error}"
-                    ),
-                    source: crate::DiagnosticSource::FolderResolution,
-                }),
-            },
-        };
-        if let Some(mut diagnostic) = selection.diagnostic {
-            diagnostic.affected_mod = Some(m.package_id.clone());
-            diagnostics.push(diagnostic);
-        }
-        if let Ok(folders) = parsed
-            && !folders.unknown_conditions.is_empty()
-        {
-            diagnostics.push(crate::Diagnostic {
-                affected_mod: Some(m.package_id.clone()),
-                severity: crate::Severity::Info,
-                message: format!(
-                    "Unknown LoadFolders.xml condition attributes: {}",
-                    folders.unknown_conditions.join(", ")
-                ),
-                source: crate::DiagnosticSource::FolderResolution,
-            });
-        }
-        if let Some(entries) = selection.entries {
-            clear_paths(m);
-            for entry in entries.iter().rev() {
-                if let Some(relative) = entry.relative_path() {
-                    add_content_dirs(m, &relative);
+    if !is_version_1_0 {
+        match find_load_folders(&m.root_path) {
+            Ok(Some(path)) => {
+                let parsed = LoadFolders::parse_file(&path);
+                let selection = match &parsed {
+                    Ok(folders) => folders.select(game_version, &active),
+                    Err(error) => crate::load_folders::FolderSelection {
+                        entries: None,
+                        diagnostic: Some(crate::Diagnostic {
+                            affected_mod: None,
+                            severity: crate::Severity::Warning,
+                            message: format!(
+                                "Failed to parse LoadFolders.xml; using implicit folder resolution: {error}"
+                            ),
+                            source: crate::DiagnosticSource::FolderResolution,
+                        }),
+                    },
+                };
+                if let Some(mut diagnostic) = selection.diagnostic {
+                    diagnostic.affected_mod = Some(m.package_id.clone());
+                    diagnostics.push(diagnostic);
+                }
+                if let Ok(folders) = parsed
+                    && !folders.unknown_conditions.is_empty()
+                {
+                    diagnostics.push(crate::Diagnostic {
+                        affected_mod: Some(m.package_id.clone()),
+                        severity: crate::Severity::Info,
+                        message: format!(
+                            "Unknown LoadFolders.xml condition attributes: {}",
+                            folders.unknown_conditions.join(", ")
+                        ),
+                        source: crate::DiagnosticSource::FolderResolution,
+                    });
+                }
+                if let Some(entries) = selection.entries {
+                    clear_paths(m);
+                    for entry in entries.iter().rev() {
+                        if let Some(relative) = entry.relative_path() {
+                            add_content_dirs(m, &relative);
+                        }
+                    }
+                    return diagnostics;
                 }
             }
-            return diagnostics;
+            Ok(None) => {}
+            Err(error) => diagnostics.push(crate::Diagnostic {
+                affected_mod: Some(m.package_id.clone()),
+                severity: crate::Severity::Warning,
+                message: format!(
+                    "Failed to inspect LoadFolders.xml in {}; using implicit folder resolution: {error}",
+                    m.root_path.display()
+                ),
+                source: crate::DiagnosticSource::FolderResolution,
+            }),
         }
     }
     resolve_implicit_folders(m, game_version);
@@ -71,25 +85,22 @@ fn clear_paths(m: &mut Mod) {
     m.assemblies_paths.clear();
 }
 
-fn find_load_folders(root: &Path) -> Option<PathBuf> {
-    let mut entries = std::fs::read_dir(root)
-        .ok()?
-        .filter_map(Result::ok)
-        .collect::<Vec<_>>();
+fn find_load_folders(root: &Path) -> std::io::Result<Option<PathBuf>> {
+    let mut entries = std::fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.file_name());
-    entries.into_iter().find_map(|entry| {
-        entry
-            .file_type()
-            .ok()?
-            .is_file()
-            .then(|| entry.path())
-            .filter(|path| {
-                path.file_name().is_some_and(|name| {
-                    name.to_string_lossy()
-                        .eq_ignore_ascii_case("LoadFolders.xml")
-                })
-            })
-    })
+    let mut found = None;
+    for entry in entries {
+        let file_type = entry.file_type()?;
+        if file_type.is_file()
+            && entry
+                .file_name()
+                .to_string_lossy()
+                .eq_ignore_ascii_case("LoadFolders.xml")
+        {
+            found.get_or_insert_with(|| entry.path());
+        }
+    }
+    Ok(found)
 }
 
 fn add_content_dirs(m: &mut Mod, relative: &Path) {
@@ -309,6 +320,7 @@ mod tests {
     fn malformed_and_unmatched_loadfolders_fall_back_but_empty_selection_stays_empty() {
         for (xml, expected_empty) in [
             ("<loadFolders><v1.5><li>broken</loadFolders>", false),
+            ("<loadFolders><v1.5><li>Folder</li></loadFolders>", false),
             (
                 "<loadFolders><v1.5><li IfModActive=\"absent\">Only</li></v1.5></loadFolders>",
                 true,
@@ -323,6 +335,27 @@ mod tests {
             assert_eq!(diagnostics[0].affected_mod.as_deref(), Some("example.mod"));
             assert_eq!(m.defs_paths.is_empty(), expected_empty);
         }
+    }
+
+    #[test]
+    fn loadfolders_inspection_error_warns_and_uses_implicit_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", None);
+        std::fs::create_dir_all(mod_path.join("Defs")).unwrap();
+        let mut m = parse_about_xml(&mod_path).unwrap();
+        std::fs::remove_dir_all(&mod_path).unwrap();
+        std::fs::write(&mod_path, "not a directory").unwrap();
+
+        let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].source,
+            crate::DiagnosticSource::FolderResolution
+        );
+        assert_eq!(diagnostics[0].severity, crate::Severity::Warning);
+        assert_eq!(diagnostics[0].affected_mod.as_deref(), Some("example.mod"));
+        assert!(diagnostics[0].message.contains("LoadFolders"));
+        assert!(m.defs_paths.is_empty());
     }
 
     #[test]

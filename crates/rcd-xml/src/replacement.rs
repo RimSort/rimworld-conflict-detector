@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use rcd_core::{Conflict, DefConflict, DefConflictMechanism, DefTarget, LoadOrder, ModSummary};
 
-use crate::def_parser::{ParsedDef, build_attrs_string};
+use crate::def_parser::ParsedDef;
 
 /// A collection of parsed defs associated with a specific mod.
 #[derive(Debug, Clone)]
@@ -121,7 +121,15 @@ fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> Stri
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                let attrs = build_attrs_string(e);
+                let attrs = match canonical_attrs(e, &reader) {
+                    Ok(attrs) => attrs,
+                    Err(error) => {
+                        errors.push(format!(
+                            "internal XML reconstruction error for {def_id}: {error}"
+                        ));
+                        return format!("!invalid-xml:{s}");
+                    }
+                };
                 result.push_str(&format!("<{tag}{attrs}>"));
             }
             Ok(Event::End(ref e)) => {
@@ -148,7 +156,15 @@ fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> Stri
             }
             Ok(Event::Empty(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                let attrs = build_attrs_string(e);
+                let attrs = match canonical_attrs(e, &reader) {
+                    Ok(attrs) => attrs,
+                    Err(error) => {
+                        errors.push(format!(
+                            "internal XML reconstruction error for {def_id}: {error}"
+                        ));
+                        return format!("!invalid-xml:{s}");
+                    }
+                };
                 result.push_str(&format!("<{tag}{attrs}/>"));
             }
             Ok(Event::Eof) => break,
@@ -216,6 +232,31 @@ fn find_divergent_fields(
     divergent
 }
 
+/// Canonicalizes attributes by decoded XML value, then safely re-escapes them.
+fn canonical_attrs(
+    element: &quick_xml::events::BytesStart<'_>,
+    reader: &quick_xml::Reader<&[u8]>,
+) -> Result<String, String> {
+    let mut attributes = Vec::new();
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        let value = attribute
+            .decode_and_unescape_value(reader.decoder())
+            .map_err(|error| format!("attribute decode failed: {error}"))?;
+        let escaped = value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('"', "&quot;");
+        attributes.push((key, escaped));
+    }
+    attributes.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(attributes
+        .into_iter()
+        .map(|(key, value)| format!(r#" {key}="{value}""#))
+        .collect())
+}
+
 /// Reads the root element attributes for root-attribute field reporting.
 fn extract_root_attributes(
     xml: &str,
@@ -232,14 +273,21 @@ fn extract_root_attributes(
             Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
                 return event
                     .attributes()
-                    .filter_map(|attribute| attribute.ok())
                     .map(|attribute| {
-                        (
+                        let attribute = attribute.map_err(quick_xml::Error::from)?;
+                        let value = attribute.decode_and_unescape_value(reader.decoder())?;
+                        Ok((
                             String::from_utf8_lossy(attribute.key.as_ref()).into_owned(),
-                            String::from_utf8_lossy(&attribute.value).into_owned(),
-                        )
+                            value.into_owned(),
+                        ))
                     })
-                    .collect();
+                    .collect::<Result<HashMap<_, _>, quick_xml::Error>>()
+                    .map_err(|error| {
+                        errors.push(format!(
+                            "internal XML reconstruction error for {def_id}: attribute decode failed: {error}"
+                        ));
+                    })
+                    .unwrap_or_default();
             }
             Ok(Event::Eof) => return HashMap::new(),
             Err(error) => {
@@ -781,6 +829,57 @@ mod tests {
         assert!(
             conflicts.is_empty(),
             "attribute order alone is not semantic: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn equivalent_attribute_entities_are_canonical_and_invalid_attributes_are_diagnostic() {
+        let make = |package: &str, xml: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: xml.into(),
+                source_file: package.into(),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make(
+                    "test.mod.a",
+                    "<ThingDef Root=\"A&amp;B\" Other=\"x\"><defName>Steel</defName><node Value=\"A&amp;B\" Other=\"x\"/><empty Value=\"A&amp;B\"/></ThingDef>",
+                ),
+                make(
+                    "test.mod.b",
+                    "<ThingDef Other=\"x\" Root=\"A&#38;B\"><defName>Steel</defName><node Other=\"x\" Value=\"A&#38;B\"/><empty Value=\"A&#38;B\"/></ThingDef>",
+                ),
+            ],
+            None,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(conflicts.is_empty(), "equivalent attributes: {conflicts:?}");
+
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make(
+                    "test.mod.c",
+                    "<ThingDef Root=\"&unknown;\"><defName>Steel</defName></ThingDef>",
+                ),
+                make(
+                    "test.mod.d",
+                    "<ThingDef Root=\"&unknown;\"><defName>Steel</defName></ThingDef>",
+                ),
+            ],
+            None,
+        );
+        assert!(
+            !errors.is_empty(),
+            "invalid attribute entity must be visible"
+        );
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "invalid attributes cannot establish equivalence"
         );
     }
 

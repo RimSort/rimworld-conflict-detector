@@ -115,6 +115,7 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
     let mut current_entry: Option<LoadFolderEntry> = None;
     let mut current_entry_element: Option<String> = None;
     let mut entry_depth = 0usize;
+    let mut element_stack: Vec<String> = Vec::new();
     let mut text = String::new();
     let mut result = LoadFolders::default();
     loop {
@@ -123,6 +124,11 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                 if root_closed {
                     return Err(LoadFoldersError::InvalidRoot);
                 }
+                let element_name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
+                if !in_root && !element_stack.is_empty() {
+                    return Err(LoadFoldersError::InvalidRoot);
+                }
+                element_stack.push(element_name);
                 let name = String::from_utf8_lossy(start.local_name().as_ref()).to_lowercase();
                 if !in_root {
                     if name != "loadfolders" {
@@ -168,6 +174,9 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                 if root_closed {
                     return Err(LoadFoldersError::InvalidRoot);
                 }
+                if !in_root && !element_stack.is_empty() {
+                    return Err(LoadFoldersError::InvalidRoot);
+                }
                 let name = String::from_utf8_lossy(start.local_name().as_ref()).to_lowercase();
                 if !in_root {
                     if name != "loadfolders" {
@@ -198,6 +207,10 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                 text.push_str(&String::from_utf8_lossy(&value))
             }
             Event::End(end) => {
+                let element_name = String::from_utf8_lossy(end.name().as_ref()).into_owned();
+                if element_stack.pop().as_deref() != Some(element_name.as_str()) {
+                    return Err(LoadFoldersError::InvalidRoot);
+                }
                 let local_name = String::from_utf8_lossy(end.local_name().as_ref()).into_owned();
                 let name = local_name.to_lowercase();
                 if current_entry.is_some() {
@@ -233,7 +246,7 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
             _ => {}
         }
     }
-    if !in_root || !root_closed || current_entry.is_some() {
+    if !in_root || !root_closed || current_entry.is_some() || !element_stack.is_empty() {
         return Err(LoadFoldersError::InvalidRoot);
     }
     Ok(result)
@@ -576,6 +589,13 @@ mod tests {
             DiagnosticSource::FolderResolution
         );
         assert!(LoadFolders::parse_str("<loadFolders><v1.5><li>abc</v1.5></loadFolders>").is_err());
+        assert!(
+            LoadFolders::parse_str("<loadFolders><v1.5><li>Folder</li></loadFolders>").is_err()
+        );
+        assert!(
+            LoadFolders::parse_str("<loadFolders><v1.5><li>Folder</li></v1.6></loadFolders>")
+                .is_err()
+        );
         assert!(LoadFolders::parse_str("<loadFolders></loadFolders><other/>").is_err());
         let fallback =
             LoadFolders::resolve_file(std::path::Path::new("/missing/LoadFolders.xml"), None, &[]);
