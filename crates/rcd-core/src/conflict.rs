@@ -28,6 +28,7 @@ pub enum DefConflictMechanism {
         xpath: String,
         replaced_by: String,
     },
+    #[serde(rename = "xpath_same_def_non_overlap")]
     XPathSameDefNonOverlap {
         xpath_pairs: Vec<(String, String)>,
     },

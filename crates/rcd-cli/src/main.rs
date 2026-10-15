@@ -165,8 +165,16 @@ fn run_list_mods(
         rimworld_path.as_deref(),
     );
 
-    // Surface discovery diagnostics (e.g. unparseable About.xml) — they
-    // explain why mods may be missing, including when none were found.
+    if matches!(format, OutputFormat::Json) {
+        println!(
+            "{}",
+            output::format_mods_list(&resolved.mods, &resolved.diagnostics, format, use_color)
+        );
+        return if resolved.mods.is_empty() { 2 } else { 0 };
+    }
+
+    // Human output surfaces discovery diagnostics (e.g. unparseable
+    // About.xml) on stderr, including when none were found.
     for d in &resolved.diagnostics {
         eprintln!("[{}] {}", d.severity, d.message);
     }
@@ -178,7 +186,7 @@ fn run_list_mods(
 
     println!(
         "{}",
-        output::format_mods_list(&resolved.mods, format, use_color)
+        output::format_mods_list(&resolved.mods, &resolved.diagnostics, format, use_color)
     );
     0
 }

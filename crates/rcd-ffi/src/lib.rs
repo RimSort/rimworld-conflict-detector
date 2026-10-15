@@ -199,7 +199,7 @@ mod tests {
 
         // Should parse as valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&result_str).unwrap();
-        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["schema_version"], 2);
     }
 
     #[test]

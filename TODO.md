@@ -14,7 +14,7 @@
 
 - [x] **Abstract def skip diagnostic** — Spec requires an Info-level diagnostic noting how many abstract defs were skipped per mod. Currently skipped silently.
 
-- [ ] **Non-overlapping same-def XPath Info conflicts** — Spec says XPath patches on the same def but non-overlapping nodes should be `Info`. Currently not emitted at all (deliberate simplification, but spec-noncompliant).
+- [x] **Non-overlapping same-def XPath Info conflicts** — Emit aggregated `Info` conflicts for non-overlapping XPath patches on the same def, retaining the XPath pairs.
 
 - [x] **Manual Harmony patch detection not integrated** — `manual.rs` with `detect_manual_patches()` exists and has tests, but `HarmonyDetector::analyze` never calls it. Wire it in, flag results as `Info` with best-effort disclaimer.
 
@@ -90,7 +90,7 @@
 
 ### Architecture / API
 
-- [ ] **`resolve_mod_folders` has dead `_active_mods` parameter** — `crates/rcd-core/src/folder.rs:21-25`. Always passed as `None`, never used. Remove and re-add when `LoadFolders.xml` conditional evaluation is implemented.
+- [x] **`resolve_mod_folders` active-mod input** — Folder resolution now receives active mod identities for `LoadFolders.xml` condition evaluation.
 
 - [ ] **`pub mod` leaks implementation details in rcd-xml and rcd-harmony** — Both crates declare all submodules as `pub mod`, exposing internal types (`ModDefs`, `ParsedDef`, `DiscoveredPatch`, etc.) when only `XmlDetector`/`HarmonyDetector` are consumed externally. Should be `mod` with selective re-exports.
 
@@ -106,7 +106,7 @@ Items surfaced by the final cross-commit review and its gate reviews, deliberate
 - [ ] **`replacement.rs` undecodable-text silent drops** — `normalize_whitespace` and `extract_tag_content`'s text arm discard `unescape()` errors; field content can vanish from the diff silently (pre-existing pattern).
 - [ ] **Comment/PI not re-emitted into `raw_xml`** — def_parser skips them from the reconstruction (matches pre-existing outer-loop behavior; only affects byte-fidelity of raw_xml, not identity).
 - [ ] **T1 manual-scan Err-arm test seam** — the `catch_unwind` Err→Warning arm in HarmonyDetector is verified by inspection only; a crash fixture was declined as YAGNI.
-- [ ] **`list-mods --format json` total failure is stderr-only** — scoped out of I-1 (scan-only); a machine consumer of list-mods still can't see resolution diagnostics.
+- [x] **`list-mods --format json` diagnostics envelope** — JSON output includes both discovered mods and resolution diagnostics, including total failure.
 - [x] **Concrete-def-no-defName diagnostic may need a config-file escape hatch** — resolved by aggregation: a corpus run over 1573 workshop mods showed the per-def Warning firing on vanilla Core/Royalty SongDefs (legitimate — RimWorld auto-names defName-less defs at runtime). Nameless concrete defs now aggregate into one Info diagnostic per mod, matching the abstract-skip convention; no escape hatch needed.
 
 ## Deferred Features (from spec)
@@ -115,7 +115,7 @@ Items surfaced by the final cross-commit review and its gate reviews, deliberate
 
 - [ ] **RimSort Steam Workshop Database fallback** — Query RimSort's community database for `packageId → workshopId` mapping when local resolution fails.
 
-- [ ] **`LoadFolders.xml` conditional evaluation** — Parse `IfModActive`/`IfModNotActive` conditions and evaluate against the active mod set for folder resolution.
+- [x] **`LoadFolders.xml` conditional evaluation** — Parse supported active/inactive condition attributes and evaluate them against active mod identities for folder resolution. Unknown condition attributes are surfaced as informational diagnostics.
 
 - [ ] **Field-level XML tree diffing** — Current replacement detection does whole-def comparison. A more sophisticated implementation would diff individual child elements and report specific divergent fields more accurately.
 

@@ -12,6 +12,7 @@ pub fn format_json(report: &Report) -> String {
 
 pub fn format_mods_list(
     mods: &[rcd_core::Mod],
+    diagnostics: &[rcd_core::Diagnostic],
     format: &crate::args::OutputFormat,
     use_color: bool,
 ) -> String {
@@ -19,7 +20,11 @@ pub fn format_mods_list(
         crate::args::OutputFormat::Json => {
             let summaries: Vec<rcd_core::ModSummary> =
                 mods.iter().map(rcd_core::ModSummary::from).collect();
-            serde_json::to_string_pretty(&summaries).unwrap()
+            serde_json::to_string_pretty(&serde_json::json!({
+                "mods": summaries,
+                "diagnostics": diagnostics,
+            }))
+            .unwrap()
         }
         crate::args::OutputFormat::Human => {
             if mods.is_empty() {
@@ -257,9 +262,14 @@ fn format_conflict(conflict: &Conflict, use_color: bool) -> String {
                 DefConflictMechanism::XPathOnReplacedDef { replaced_by, .. } => {
                     format!("XPath patch on def replaced by {}", replaced_by)
                 }
-                DefConflictMechanism::XPathSameDefNonOverlap { .. } => {
-                    "same def, non-overlapping XPath patches".to_string()
-                }
+                DefConflictMechanism::XPathSameDefNonOverlap { xpath_pairs } => format!(
+                    "same def, non-overlapping XPath patches (pairs: {})",
+                    xpath_pairs
+                        .iter()
+                        .map(|(a, b)| format!("{a} ↔ {b}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
             };
             out.push_str(&format!(
                 "[{}] {} — {}\n",
@@ -313,7 +323,7 @@ mod tests {
 
     fn empty_report() -> Report {
         Report {
-            schema_version: 1,
+            schema_version: 2,
             metadata: ReportMetadata {
                 timestamp: String::new(),
                 game_version: None,
@@ -403,6 +413,43 @@ mod tests {
         assert!(
             !out.contains("info diagnostic(s)"),
             "zero info diagnostics are omitted: {out}"
+        );
+    }
+
+    #[test]
+    fn format_human_shows_xpath_pairs_for_aggregated_non_overlap_conflict() {
+        let mut report = empty_report();
+        report.conflicts.push(Conflict::Def(rcd_core::DefConflict {
+            target: rcd_core::DefTarget {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+            },
+            mods: vec![
+                rcd_core::ModSummary {
+                    package_id: "mod.a".into(),
+                    name: "Mod A".into(),
+                    author: None,
+                    is_base_content: false,
+                },
+                rcd_core::ModSummary {
+                    package_id: "mod.b".into(),
+                    name: "Mod B".into(),
+                    author: None,
+                    is_base_content: false,
+                },
+            ],
+            mechanism: DefConflictMechanism::XPathSameDefNonOverlap {
+                xpath_pairs: vec![("Defs/Steel/label".into(), "Defs/Steel/description".into())],
+            },
+            winner: None,
+            condition: None,
+        }));
+
+        let out = format_human(&report, Severity::Info, &GroupBy::Severity, false);
+
+        assert!(
+            out.contains("Defs/Steel/label ↔ Defs/Steel/description"),
+            "{out}"
         );
     }
 

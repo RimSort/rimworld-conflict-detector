@@ -36,7 +36,7 @@ fn detect_direct_replacement_conflict() {
 fn report_has_correct_schema_version() {
     let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
     let report = run_analysis(&mods, None);
-    assert_eq!(report.schema_version, 1);
+    assert_eq!(report.schema_version, 2);
 }
 
 #[test]
