@@ -1,4 +1,5 @@
 use crate::LoadOrder;
+use crate::xml_io::read_xml_file;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use std::path::Path;
@@ -16,7 +17,7 @@ impl ModsConfig {
 }
 
 pub fn parse_mods_config(path: &Path) -> Result<ModsConfig, Box<dyn std::error::Error>> {
-    let xml = std::fs::read_to_string(path)?;
+    let xml = read_xml_file(path)?;
     parse_mods_config_str(&xml)
 }
 

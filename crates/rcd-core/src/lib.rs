@@ -8,6 +8,7 @@ pub mod mods_config;
 pub mod report;
 pub mod severity;
 pub mod types;
+pub mod xml_io;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod testutil;
