@@ -54,13 +54,18 @@ pub fn detect_replacements(
         }
 
         // Normalize whitespace for comparison: collapse all runs of whitespace to a single space
+        let errors_before_normalization = errors.len();
         let normalized: Vec<String> = entries
             .iter()
-            .map(|(_, xml)| normalize_whitespace(xml))
+            .map(|(_, xml)| {
+                normalize_whitespace(xml, &format!("{def_type}:{def_name}"), &mut errors)
+            })
             .collect();
 
-        // Check if all normalized XMLs are identical
-        let all_identical = normalized.windows(2).all(|w| w[0] == w[1]);
+        // Invalid text/XML cannot establish semantic equivalence, even when
+        // the malformed source bytes happen to be identical.
+        let all_identical = errors.len() == errors_before_normalization
+            && normalized.windows(2).all(|w| w[0] == w[1]);
         if all_identical {
             continue;
         }
@@ -102,7 +107,7 @@ pub fn detect_replacements(
 /// Normalizes an XML string for semantic comparison by re-parsing it and
 /// rebuilding a canonical form. This strips insignificant whitespace between
 /// tags so that formatting differences don't trigger false conflicts.
-fn normalize_whitespace(s: &str) -> String {
+fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> String {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -123,12 +128,16 @@ fn normalize_whitespace(s: &str) -> String {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 result.push_str(&format!("</{tag}>"));
             }
-            Ok(Event::Text(ref t)) => {
-                if let Ok(text) = t.unescape() {
+            Ok(Event::Text(ref t)) => match t.unescape() {
+                Ok(text) => {
                     let trimmed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
                     result.push_str(&trimmed);
                 }
-            }
+                Err(error) => {
+                    errors.push(format!("internal XML reconstruction error for {def_id}: text decode failed: {error}"));
+                    return format!("!invalid-xml:{s}");
+                }
+            },
             Ok(Event::CData(ref c)) => {
                 // CDATA content is already decoded; canonicalize it like Text
                 // so CDATA-only divergences are visible to the comparison
@@ -143,7 +152,12 @@ fn normalize_whitespace(s: &str) -> String {
                 result.push_str(&format!("<{tag}{attrs}/>"));
             }
             Ok(Event::Eof) => break,
-            Err(_) => return s.split_whitespace().collect::<Vec<_>>().join(" "),
+            Err(error) => {
+                errors.push(format!(
+                    "internal XML reconstruction error for {def_id}: {error}"
+                ));
+                return format!("!invalid-xml:{s}");
+            }
             _ => {}
         }
         buf.clear();
@@ -163,12 +177,22 @@ fn find_divergent_fields(
         return Vec::new();
     }
 
-    let base_normalized = normalize_whitespace(&entries[0].1);
+    let base_normalized = normalize_whitespace(&entries[0].1, def_id, errors);
     let mut divergent = Vec::new();
 
     for entry in &entries[1..] {
-        let other_normalized = normalize_whitespace(&entry.1);
+        let other_normalized = normalize_whitespace(&entry.1, def_id, errors);
         if base_normalized != other_normalized {
+            let base_attributes = extract_root_attributes(&entries[0].1, def_id, errors);
+            let other_attributes = extract_root_attributes(&entry.1, def_id, errors);
+            for name in base_attributes.keys().chain(other_attributes.keys()) {
+                if base_attributes.get(name) != other_attributes.get(name) {
+                    let field = format!("@{name}");
+                    if !divergent.contains(&field) {
+                        divergent.push(field);
+                    }
+                }
+            }
             // Simple heuristic: find top-level child tags that differ
             let base_tags = extract_child_tags(&entries[0].1, def_id, errors);
             let other_tags = extract_child_tags(&entry.1, def_id, errors);
@@ -190,6 +214,44 @@ fn find_divergent_fields(
     }
 
     divergent
+}
+
+/// Reads the root element attributes for root-attribute field reporting.
+fn extract_root_attributes(
+    xml: &str,
+    def_id: &str,
+    errors: &mut Vec<String>,
+) -> HashMap<String, String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
+                return event
+                    .attributes()
+                    .filter_map(|attribute| attribute.ok())
+                    .map(|attribute| {
+                        (
+                            String::from_utf8_lossy(attribute.key.as_ref()).into_owned(),
+                            String::from_utf8_lossy(&attribute.value).into_owned(),
+                        )
+                    })
+                    .collect();
+            }
+            Ok(Event::Eof) => return HashMap::new(),
+            Err(error) => {
+                errors.push(format!(
+                    "internal XML reconstruction error for {def_id}: {error}"
+                ));
+                return HashMap::new();
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// Extracts immediate child tag names from a def's raw XML.
@@ -277,10 +339,17 @@ fn extract_tag_content(
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if capture_depth.is_some()
-                    && let Ok(text) = t.unescape()
-                {
-                    captured.push_str(&text);
+                if capture_depth.is_some() {
+                    match t.unescape() {
+                        Ok(text) => captured.push_str(&text),
+                        Err(error) => {
+                            errors.push(format!("internal XML reconstruction error for {def_id}: text decode failed: {error}"));
+                            captured.push_str(&format!(
+                                "!invalid-text:{}",
+                                String::from_utf8_lossy(t.as_ref())
+                            ));
+                        }
+                    }
                 }
             }
             Ok(Event::CData(ref c)) => {
@@ -291,7 +360,7 @@ fn extract_tag_content(
             Ok(Event::End(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if capture_depth == Some(depth) && tag == target_tag {
-                    return Some(normalize_whitespace(&captured));
+                    return Some(captured.split_whitespace().collect::<Vec<_>>().join(" "));
                 }
                 if capture_depth.is_some() {
                     captured.push_str(&format!("</{tag}>"));
@@ -655,6 +724,109 @@ mod tests {
             },
             _ => panic!("Expected Conflict::Def"),
         }
+    }
+
+    #[test]
+    fn root_attribute_only_differences_are_reported() {
+        let make = |package: &str, name: &str, nested: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".to_string(),
+                def_name: "Steel".to_string(),
+                raw_xml: format!(
+                    "<ThingDef Name=\"{name}\"><defName>Steel</defName><costList>{nested}</costList></ThingDef>"
+                ),
+                source_file: format!("{package}.xml"),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make("test.mod.a", "base", "<li A=\"1\" B=\"2\">x</li>"),
+                make("test.mod.b", "other", "<li B=\"2\" A=\"1\">x</li>"),
+            ],
+            None,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let Conflict::Def(conflict) = &conflicts[0] else {
+            panic!("expected def conflict")
+        };
+        let DefConflictMechanism::DirectReplacement { divergent_fields } = &conflict.mechanism
+        else {
+            panic!("expected direct replacement")
+        };
+        assert_eq!(divergent_fields, &["@Name"]);
+    }
+
+    #[test]
+    fn root_and_nested_attribute_order_is_semantically_irrelevant() {
+        let make = |package: &str, xml: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: xml.into(),
+                source_file: package.into(),
+            }],
+        };
+        let a = make(
+            "test.mod.a",
+            "<ThingDef B=\"2\" A=\"1\"><defName>Steel</defName><node Z=\"9\" Y=\"8\"/></ThingDef>",
+        );
+        let b = make(
+            "test.mod.b",
+            "<ThingDef A=\"1\" B=\"2\"><defName>Steel</defName><node Y=\"8\" Z=\"9\"/></ThingDef>",
+        );
+        let (conflicts, errors) = detect_replacements(&[a, b], None);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            conflicts.is_empty(),
+            "attribute order alone is not semantic: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_text_decoding_is_diagnostic_and_not_equivalent() {
+        let make = |package: &str, text: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: format!(
+                    "<ThingDef><defName>Steel</defName><label>{text}</label></ThingDef>"
+                ),
+                source_file: package.into(),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make("test.mod.a", "&unknown;"),
+                make("test.mod.b", "distinct"),
+            ],
+            None,
+        );
+        assert!(
+            !errors.is_empty(),
+            "invalid entity decoding must be visible"
+        );
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "bad text must not collapse into a false equivalent"
+        );
+
+        let (identical_invalid_conflicts, identical_invalid_errors) = detect_replacements(
+            &[
+                make("test.mod.c", "&unknown;"),
+                make("test.mod.d", "&unknown;"),
+            ],
+            None,
+        );
+        assert!(!identical_invalid_errors.is_empty());
+        assert_eq!(
+            identical_invalid_conflicts.len(),
+            1,
+            "malformed text cannot establish equivalence"
+        );
     }
 
     #[test]
