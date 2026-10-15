@@ -3,16 +3,6 @@ use crate::load_folders::{LoadFolders, ModIdentity, normalize_game_version};
 use crate::types::{Mod, ModSummary};
 use std::path::{Path, PathBuf};
 
-/// Compatibility resolver for callers that cannot consume folder diagnostics.
-/// New resolution paths should use `resolve_mod_folders_with_active`.
-pub fn resolve_mod_folders(
-    m: &mut Mod,
-    game_version: Option<&str>,
-    _active_mods: Option<&[String]>,
-) {
-    resolve_implicit_folders(m, game_version);
-}
-
 /// Resolve folder paths against active mod identities and return diagnostics.
 pub fn resolve_mod_folders_with_active(
     m: &mut Mod,

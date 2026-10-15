@@ -660,6 +660,7 @@ dependencies = [
  "rcd-core",
  "rcd-harmony",
  "rcd-xml",
+ "serde",
  "serde_json",
 ]
 

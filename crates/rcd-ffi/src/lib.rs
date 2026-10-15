@@ -1,9 +1,31 @@
 // RimWorld Conflict Detector - FFI surface
 
+use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 
+/// `phase` points to a string valid only during this synchronous callback invocation.
 pub type ProgressCallback = extern "C" fn(current: u32, total: u32, phase: *const c_char);
+
+#[derive(Debug, Deserialize)]
+struct RcdConfig {
+    #[serde(default)]
+    mod_paths: Vec<std::path::PathBuf>,
+    #[serde(default, deserialize_with = "deserialize_game_version")]
+    game_version: Option<String>,
+    #[serde(default)]
+    ordered: bool,
+    #[serde(flatten)]
+    extras: BTreeMap<String, serde_json::Value>,
+}
+
+fn deserialize_game_version<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
 
 /// Analyze mods for conflicts.
 ///
@@ -30,33 +52,29 @@ pub unsafe extern "C" fn rcd_analyze(
             }
         };
 
-        // Parse the config JSON
-        // Expected structure: { "mod_paths": ["/path/to/mod1", ...], "game_version": "1.5", "ordered": false }
-        let config: serde_json::Value = match serde_json::from_str(&config_str) {
-            Ok(v) => v,
+        // Parse config strictly: known fields with invalid types are errors.
+        let config: RcdConfig = match serde_json::from_str(&config_str) {
+            Ok(config) => config,
             Err(e) => return error_json(&format!("Invalid config JSON: {}", e)),
         };
+        let game_version = config.game_version.as_deref();
+        let ordered = config.ordered;
 
-        // Extract mod paths
-        let mod_paths: Vec<std::path::PathBuf> = config["mod_paths"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|v| v.as_str().map(std::path::PathBuf::from))
-            .collect();
-
-        let game_version = config["game_version"].as_str();
-        let ordered = config["ordered"].as_bool().unwrap_or(false);
-
-        // Resolve mods
+        // Parse all metadata first so every supplied mod is active when conditions resolve.
         let mut mods = Vec::new();
         let mut pre_diagnostics: Vec<rcd_core::Diagnostic> = Vec::new();
-        for path in &mod_paths {
+        if !config.extras.is_empty() {
+            let keys = config.extras.keys().cloned().collect::<Vec<_>>().join(", ");
+            pre_diagnostics.push(rcd_core::Diagnostic {
+                affected_mod: None,
+                severity: rcd_core::Severity::Warning,
+                message: format!("Unknown config fields ignored: {keys}"),
+                source: rcd_core::DiagnosticSource::MetadataResolution,
+            });
+        }
+        for path in &config.mod_paths {
             match rcd_core::about_xml::parse_about_xml(path) {
-                Ok(mut m) => {
-                    rcd_core::folder::resolve_mod_folders(&mut m, game_version, None);
-                    mods.push(m);
-                }
+                Ok(m) => mods.push(m),
                 Err(e) => pre_diagnostics.push(rcd_core::diagnostic::about_parse_failure(
                     path,
                     &e,
@@ -64,6 +82,18 @@ pub unsafe extern "C" fn rcd_analyze(
                     rcd_core::DiagnosticSource::MetadataResolution,
                 )),
             }
+        }
+        rcd_core::content_files::mark_base_content(&mut mods);
+        let active_mods = mods
+            .iter()
+            .map(rcd_core::ModSummary::from)
+            .collect::<Vec<_>>();
+        for m in &mut mods {
+            pre_diagnostics.extend(rcd_core::folder::resolve_mod_folders_with_active(
+                m,
+                game_version,
+                &active_mods,
+            ));
         }
 
         let load_order = if ordered {
@@ -184,6 +214,178 @@ mod tests {
         let ts = parsed["metadata"]["timestamp"].as_str().unwrap();
         assert!(!ts.is_empty(), "timestamp should not be empty");
         chrono::DateTime::parse_from_rfc3339(ts).expect("timestamp should be valid RFC 3339");
+    }
+
+    fn analyze_json(value: serde_json::Value) -> serde_json::Value {
+        let config = CString::new(value.to_string()).unwrap();
+        let ptr = unsafe { rcd_analyze(config.as_ptr(), None) };
+        assert!(!ptr.is_null());
+        let json = unsafe { CStr::from_ptr(ptr) }.to_str().unwrap().to_owned();
+        unsafe { rcd_free(ptr) };
+        serde_json::from_str(&json).unwrap()
+    }
+
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "rcd-ffi-test-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn make_mod(
+        root: &std::path::Path,
+        id: &str,
+        name: &str,
+        folders: Option<&str>,
+    ) -> std::path::PathBuf {
+        let path = root.join(id);
+        std::fs::create_dir_all(path.join("About")).unwrap();
+        std::fs::write(
+            path.join("About/About.xml"),
+            format!("<ModMetaData><packageId>{id}</packageId><name>{name}</name></ModMetaData>"),
+        )
+        .unwrap();
+        if let Some(folders) = folders {
+            std::fs::write(path.join("LoadFolders.xml"), folders).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn omitted_and_valid_config_fields_keep_expected_defaults() {
+        let omitted = analyze_json(serde_json::json!({}));
+        assert_eq!(omitted["metadata"]["game_version"], serde_json::Value::Null);
+        assert_eq!(omitted["metadata"]["order_aware"], false);
+
+        let valid = analyze_json(serde_json::json!({
+            "mod_paths": [], "game_version": "1.7.4976 rev44", "ordered": true
+        }));
+        assert_eq!(valid["metadata"]["game_version"], "1.7.4976 rev44");
+        assert_eq!(valid["metadata"]["order_aware"], true);
+    }
+
+    #[test]
+    fn invalid_known_field_types_return_json_errors() {
+        for config in [
+            serde_json::json!({"mod_paths": "bad"}),
+            serde_json::json!({"mod_paths": ["valid", 7]}),
+            serde_json::json!({"game_version": 17}),
+            serde_json::json!({"game_version": null}),
+            serde_json::json!({"ordered": "yes"}),
+        ] {
+            assert!(analyze_json(config).get("error").is_some());
+        }
+    }
+
+    #[test]
+    fn unknown_config_keys_warn_without_leaking_values_or_stopping_scan() {
+        let root = TempDir::new();
+        let path = make_mod(root.path(), "example.mod", "Example", None);
+        let report = analyze_json(serde_json::json!({
+            "mod_paths": [path], "mystery_z": "secret-value", "mystery_a": true
+        }));
+        assert_eq!(
+            report["metadata"]["mods_scanned"].as_array().unwrap().len(),
+            1
+        );
+        let diagnostics = report["diagnostics"].as_array().unwrap();
+        let warning = diagnostics
+            .iter()
+            .find(|d| d["source"] == "metadata_resolution")
+            .unwrap();
+        assert_eq!(warning["severity"], "warning");
+        assert!(
+            warning["message"]
+                .as_str()
+                .unwrap()
+                .find("mystery_a")
+                .unwrap()
+                < warning["message"]
+                    .as_str()
+                    .unwrap()
+                    .find("mystery_z")
+                    .unwrap()
+        );
+        assert!(
+            !warning["message"]
+                .as_str()
+                .unwrap()
+                .contains("secret-value")
+        );
+    }
+
+    #[test]
+    fn all_supplied_mods_are_active_for_loadfolders_conditions() {
+        let root = TempDir::new();
+        let condition = make_mod(
+            root.path(),
+            "conditional.mod",
+            "Conditional",
+            Some(
+                "<loadFolders><v1.5><li IfModActive=\"active.mod\">Selected</li></v1.5></loadFolders>",
+            ),
+        );
+        let active = make_mod(root.path(), "active.mod", "Active", None);
+        std::fs::create_dir_all(condition.join("Selected/Defs")).unwrap();
+        std::fs::write(condition.join("Selected/Defs/broken.xml"), "<broken").unwrap();
+        std::fs::create_dir_all(condition.join("Defs")).unwrap();
+        let report = analyze_json(serde_json::json!({
+            "mod_paths": [condition, active], "game_version": "1.5.4104 rev1"
+        }));
+        assert!(
+            report["diagnostics"].as_array().unwrap().iter().any(|d| {
+                d["source"] == "xml_parsing" && d["affected_mod"] == "conditional.mod"
+            }),
+            "selected conditional path should be scanned: {report}"
+        );
+    }
+
+    #[test]
+    fn ffi_reports_folder_resolution_diagnostics() {
+        let root = TempDir::new();
+        let path = make_mod(
+            root.path(),
+            "broken.mod",
+            "Broken",
+            Some("<loadFolders><v1.5><li>Broken"),
+        );
+        let report = analyze_json(serde_json::json!({
+            "mod_paths": [path], "game_version": "1.5.4104 rev1"
+        }));
+        assert!(report["diagnostics"].as_array().unwrap().iter().any(|d| {
+            d["source"] == "folder_resolution"
+                && d["severity"] == "warning"
+                && d["affected_mod"] == "broken.mod"
+        }));
+    }
+
+    #[test]
+    fn ffi_marks_ludeon_mods_as_base_content() {
+        let root = TempDir::new();
+        let path = make_mod(root.path(), "ludeon.rimworld", "Core", None);
+        let report = analyze_json(serde_json::json!({"mod_paths": [path]}));
+        assert_eq!(
+            report["metadata"]["mods_scanned"][0]["is_base_content"],
+            true
+        );
     }
 
     #[test]
