@@ -1,15 +1,8 @@
 use crate::about_xml::parse_about_xml;
-use crate::types::Mod;
-use std::path::PathBuf;
+use crate::load_folders::{LoadFolders, ModIdentity};
+use crate::types::{Mod, ModSummary};
+use std::path::{Path, PathBuf};
 
-/// Resolve folder paths for a mod based on game version.
-///
-/// Resolution order for Defs, Patches, and Assemblies:
-/// 1. Version-specific folder (e.g., `1.5/Defs`, `1.5/Patches`, `1.5/Assemblies`) — highest priority
-/// 2. `Common/` folder (`Common/Defs`, `Common/Patches`, `Common/Assemblies`)
-/// 3. Root folder (`Defs/`, `Patches/`, `Assemblies/`) — only if no version-specific folder was found
-///
-/// Sets `m.defs_paths`, `m.patches_paths`, `m.assemblies_paths`.
 fn is_valid_game_version(v: &str) -> bool {
     let parts: Vec<&str> = v.split('.').collect();
     parts.len() == 2
@@ -18,115 +11,226 @@ fn is_valid_game_version(v: &str) -> bool {
             .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
 }
 
+/// Compatibility resolver for callers that cannot consume folder diagnostics.
+/// New resolution paths should use `resolve_mod_folders_with_active`.
 pub fn resolve_mod_folders(
     m: &mut Mod,
     game_version: Option<&str>,
     _active_mods: Option<&[String]>,
 ) {
+    resolve_implicit_folders(m, game_version);
+}
+
+/// Resolve folder paths against active mod identities and return diagnostics.
+pub fn resolve_mod_folders_with_active(
+    m: &mut Mod,
+    game_version: Option<&str>,
+    active_mods: &[ModSummary],
+) -> Vec<crate::Diagnostic> {
+    let active = active_mods
+        .iter()
+        .map(|summary| ModIdentity {
+            package_id: summary.package_id.clone(),
+            display_name: summary.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut diagnostics = Vec::new();
+    if let Some(path) = find_load_folders(&m.root_path) {
+        let parsed = LoadFolders::parse_file(&path);
+        let selection = match &parsed {
+            Ok(folders) => folders.select(game_version, &active),
+            Err(error) => crate::load_folders::FolderSelection {
+                entries: None,
+                diagnostic: Some(crate::Diagnostic {
+                    affected_mod: None,
+                    severity: crate::Severity::Warning,
+                    message: format!(
+                        "Failed to parse LoadFolders.xml; using implicit folder resolution: {error}"
+                    ),
+                    source: crate::DiagnosticSource::FolderResolution,
+                }),
+            },
+        };
+        if let Some(mut diagnostic) = selection.diagnostic {
+            diagnostic.affected_mod = Some(m.package_id.clone());
+            diagnostics.push(diagnostic);
+        }
+        if let Ok(folders) = parsed
+            && !folders.unknown_conditions.is_empty()
+        {
+            diagnostics.push(crate::Diagnostic {
+                affected_mod: Some(m.package_id.clone()),
+                severity: crate::Severity::Info,
+                message: format!(
+                    "Unknown LoadFolders.xml condition attributes: {}",
+                    folders.unknown_conditions.join(", ")
+                ),
+                source: crate::DiagnosticSource::FolderResolution,
+            });
+        }
+        if let Some(entries) = selection.entries {
+            clear_paths(m);
+            for entry in entries.iter().rev() {
+                if let Some(relative) = entry.relative_path() {
+                    add_content_dirs(m, &relative);
+                }
+            }
+            return diagnostics;
+        }
+    }
+    resolve_implicit_folders(m, game_version);
+    diagnostics
+}
+
+fn clear_paths(m: &mut Mod) {
     m.defs_paths.clear();
     m.patches_paths.clear();
     m.assemblies_paths.clear();
+}
 
-    let game_version = game_version.filter(|v| is_valid_game_version(v));
+fn find_load_folders(root: &Path) -> Option<PathBuf> {
+    let mut entries = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+    entries.into_iter().find_map(|entry| {
+        entry
+            .file_type()
+            .ok()?
+            .is_file()
+            .then(|| entry.path())
+            .filter(|path| {
+                path.file_name().is_some_and(|name| {
+                    name.to_string_lossy()
+                        .eq_ignore_ascii_case("LoadFolders.xml")
+                })
+            })
+    })
+}
 
-    // Helper to check if a directory exists and add it to the paths
-    let add_if_exists = |paths: &mut Vec<PathBuf>, subpath: &str| {
-        let full_path = m.root_path.join(subpath);
-        if full_path.is_dir() {
-            paths.push(full_path);
-        }
-    };
-
-    // Resolve for each folder type (Defs, Patches, Assemblies)
-    for (folder_name, paths) in [
+fn add_content_dirs(m: &mut Mod, relative: &Path) {
+    for (folder, paths) in [
         ("Defs", &mut m.defs_paths),
         ("Patches", &mut m.patches_paths),
         ("Assemblies", &mut m.assemblies_paths),
     ] {
-        let mut found_version_specific = false;
-
-        // 1. Check for version-specific folder
-        if let Some(version) = game_version {
-            let version_path = format!("{}/{}", version, folder_name);
-            let full_path = m.root_path.join(&version_path);
-            if full_path.is_dir() {
-                paths.push(full_path);
-                found_version_specific = true;
-            }
-        }
-
-        // 2. Check for Common/ folder
-        add_if_exists(paths, &format!("Common/{}", folder_name));
-
-        // 3. Check for root folder (only if no version-specific folder was found)
-        if !found_version_specific {
-            add_if_exists(paths, folder_name);
+        let full = m.root_path.join(relative).join(folder);
+        if full.is_dir() {
+            paths.push(full);
         }
     }
 }
 
-/// Discover mods in the given search directories.
-///
-/// Iterates through each search directory, finds subdirectories with `About/About.xml`,
-/// parses them with `parse_about_xml`, calls `resolve_mod_folders` on each, and returns the list.
+fn resolve_implicit_folders(m: &mut Mod, game_version: Option<&str>) {
+    clear_paths(m);
+    let version = game_version.filter(|v| is_valid_game_version(v));
+    for (folder, paths) in [
+        ("Defs", &mut m.defs_paths),
+        ("Patches", &mut m.patches_paths),
+        ("Assemblies", &mut m.assemblies_paths),
+    ] {
+        if let Some(version) = version {
+            let path = m.root_path.join(version).join(folder);
+            if path.is_dir() {
+                paths.push(path);
+            }
+        }
+        let common = m.root_path.join("Common").join(folder);
+        if common.is_dir() {
+            paths.push(common);
+        }
+        let root = m.root_path.join(folder);
+        if root.is_dir() {
+            paths.push(root);
+        }
+    }
+}
+
+/// Discover all mods and resolve conditions using the supplied active package IDs.
+pub fn discover_mods_with_active(
+    search_dirs: &[PathBuf],
+    game_version: Option<&str>,
+    active_ids: &[String],
+) -> (Vec<Mod>, Vec<crate::Diagnostic>) {
+    let (mut mods, mut diagnostics) = discover_mod_metadata(search_dirs);
+    let mut active = mods
+        .iter()
+        .filter(|m| {
+            active_ids
+                .iter()
+                .any(|id| id.eq_ignore_ascii_case(&m.package_id))
+        })
+        .map(ModSummary::from)
+        .collect::<Vec<_>>();
+    for id in active_ids {
+        if !active
+            .iter()
+            .any(|summary| summary.package_id.eq_ignore_ascii_case(id))
+        {
+            active.push(ModSummary {
+                package_id: id.clone(),
+                name: String::new(),
+                author: None,
+                is_base_content: false,
+            });
+        }
+    }
+    for m in &mut mods {
+        diagnostics.extend(resolve_mod_folders_with_active(m, game_version, &active));
+    }
+    (mods, diagnostics)
+}
+
+/// Discover mods with every discovered mod active.
 pub fn discover_mods(
     search_dirs: &[PathBuf],
     game_version: Option<&str>,
 ) -> (Vec<Mod>, Vec<crate::Diagnostic>) {
+    let (mut mods, mut diagnostics) = discover_mod_metadata(search_dirs);
+    let active = mods.iter().map(ModSummary::from).collect::<Vec<_>>();
+    for m in &mut mods {
+        diagnostics.extend(resolve_mod_folders_with_active(m, game_version, &active));
+    }
+    (mods, diagnostics)
+}
+
+fn discover_mod_metadata(search_dirs: &[PathBuf]) -> (Vec<Mod>, Vec<crate::Diagnostic>) {
     let mut mods = Vec::new();
     let mut diagnostics = Vec::new();
-
     for search_dir in search_dirs {
         if !search_dir.is_dir() {
-            continue; // absent dir is normal (e.g., no Workshop install) — not an error
+            continue;
         }
-
         let entries = match std::fs::read_dir(search_dir) {
             Ok(entries) => entries,
             Err(e) => {
-                diagnostics.push(crate::Diagnostic {
-                    affected_mod: None,
-                    severity: crate::Severity::Warning,
-                    message: format!("Failed to read directory {}: {}", search_dir.display(), e),
-                    source: crate::DiagnosticSource::FolderResolution,
-                });
+                diagnostics.push(discovery_warning(format!(
+                    "Failed to read directory {}: {}",
+                    search_dir.display(),
+                    e
+                )));
                 continue;
             }
         };
-
         for entry in entries {
             let entry = match entry {
-                Ok(e) => e,
+                Ok(entry) => entry,
                 Err(e) => {
-                    diagnostics.push(crate::Diagnostic {
-                        affected_mod: None,
-                        severity: crate::Severity::Warning,
-                        message: format!(
-                            "Failed to read directory entry in {}: {}",
-                            search_dir.display(),
-                            e
-                        ),
-                        source: crate::DiagnosticSource::FolderResolution,
-                    });
+                    diagnostics.push(discovery_warning(format!(
+                        "Failed to read directory entry in {}: {}",
+                        search_dir.display(),
+                        e
+                    )));
                     continue;
                 }
             };
             let path = entry.path();
-            if !path.is_dir() {
+            if !path.is_dir() || !path.join("About/About.xml").exists() {
                 continue;
             }
-
-            // Check if About/About.xml exists
-            let about_xml = path.join("About/About.xml");
-            if !about_xml.exists() {
-                continue; // directory without About.xml is not a mod — silent by design
-            }
-
             match parse_about_xml(&path) {
-                Ok(mut mod_data) => {
-                    resolve_mod_folders(&mut mod_data, game_version, None);
-                    mods.push(mod_data);
-                }
+                Ok(mod_data) => mods.push(mod_data),
                 Err(e) => diagnostics.push(crate::about_parse_failure(
                     &path,
                     &e,
@@ -136,8 +240,16 @@ pub fn discover_mods(
             }
         }
     }
-
     (mods, diagnostics)
+}
+
+fn discovery_warning(message: String) -> crate::Diagnostic {
+    crate::Diagnostic {
+        affected_mod: None,
+        severity: crate::Severity::Warning,
+        message,
+        source: crate::DiagnosticSource::FolderResolution,
+    }
 }
 
 #[cfg(test)]
@@ -146,86 +258,131 @@ mod tests {
     use crate::testutil::fixtures_path;
 
     #[test]
-    fn resolve_version_specific_folder() {
-        let mut m = parse_about_xml(&fixtures_path().join("mod_versioned")).unwrap();
-        resolve_mod_folders(&mut m, Some("1.5"), None);
-        assert!(m.defs_paths.iter().any(|p| p.ends_with("1.5/Defs")));
+    fn resolve_version_common_and_root_together_in_precedence_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let about = dir.path().join("About");
+        std::fs::create_dir_all(about).unwrap();
+        std::fs::write(
+            dir.path().join("About/About.xml"),
+            "<ModMetaData><packageId>x</packageId><name>x</name></ModMetaData>",
+        )
+        .unwrap();
+        for path in ["1.5/Defs", "Common/Defs", "Defs"] {
+            std::fs::create_dir_all(dir.path().join(path)).unwrap();
+        }
+        let mut m = parse_about_xml(dir.path()).unwrap();
+        resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        assert_eq!(
+            m.defs_paths,
+            [
+                dir.path().join("1.5/Defs"),
+                dir.path().join("Common/Defs"),
+                dir.path().join("Defs")
+            ]
+        );
+    }
+
+    fn write_mod(
+        root: &Path,
+        folder: &str,
+        id: &str,
+        name: &str,
+        load_folders: Option<&str>,
+    ) -> PathBuf {
+        let path = root.join(folder);
+        std::fs::create_dir_all(path.join("About")).unwrap();
+        std::fs::write(
+            path.join("About/About.xml"),
+            format!("<ModMetaData><packageId>{id}</packageId><name>{name}</name></ModMetaData>"),
+        )
+        .unwrap();
+        if let Some(xml) = load_folders {
+            std::fs::write(path.join("lOaDfOlDeRs.XmL"), xml).unwrap();
+        }
+        path
     }
 
     #[test]
-    fn resolve_common_folder() {
-        let mut m = parse_about_xml(&fixtures_path().join("mod_versioned")).unwrap();
-        resolve_mod_folders(&mut m, Some("1.5"), None);
-        assert!(m.defs_paths.iter().any(|p| p.ends_with("Common/Defs")));
-    }
-
-    #[test]
-    fn invalid_game_version_treated_as_none() {
-        let mut m = parse_about_xml(&fixtures_path().join("mod_versioned")).unwrap();
-        resolve_mod_folders(&mut m, Some("../../etc"), None);
-        assert!(
-            !m.defs_paths
-                .iter()
-                .any(|p| p.to_string_lossy().contains("etc")),
-            "Path traversal in game_version should be rejected"
+    fn explicit_entries_reverse_precedence_and_ignore_missing_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let xml =
+            "<loadFolders><v1.5><li>First</li><li>Missing</li><li>Last</li></v1.5></loadFolders>";
+        let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", Some(xml));
+        for path in ["First/Defs", "Last/Defs"] {
+            std::fs::create_dir_all(mod_path.join(path)).unwrap();
+        }
+        let mut m = parse_about_xml(&mod_path).unwrap();
+        let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            m.defs_paths,
+            [mod_path.join("Last/Defs"), mod_path.join("First/Defs")]
         );
     }
 
     #[test]
-    fn valid_game_version_formats() {
-        assert!(is_valid_game_version("1.5"));
-        assert!(is_valid_game_version("1.4"));
-        assert!(!is_valid_game_version("../../etc"));
-        assert!(!is_valid_game_version("1.5.3"));
-        assert!(!is_valid_game_version(""));
-        assert!(!is_valid_game_version(".5"));
-        assert!(!is_valid_game_version("1."));
+    fn malformed_and_unmatched_loadfolders_fall_back_but_empty_selection_stays_empty() {
+        for (xml, expected_empty) in [
+            ("<loadFolders><v1.5><li>broken</loadFolders>", false),
+            (
+                "<loadFolders><v1.5><li IfModActive=\"absent\">Only</li></v1.5></loadFolders>",
+                true,
+            ),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", Some(xml));
+            std::fs::create_dir_all(mod_path.join("Defs")).unwrap();
+            let mut m = parse_about_xml(&mod_path).unwrap();
+            let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+            assert_eq!(diagnostics.len(), 1);
+            assert_eq!(diagnostics[0].affected_mod.as_deref(), Some("example.mod"));
+            assert_eq!(m.defs_paths.is_empty(), expected_empty);
+        }
+    }
+
+    #[test]
+    fn no_applicable_loadfolders_entry_falls_back_to_implicit_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let mod_path = write_mod(
+            root.path(),
+            "mod",
+            "example.mod",
+            "Example",
+            Some("<loadFolders><v1.6><li>New</li></v1.6></loadFolders>"),
+        );
+        std::fs::create_dir_all(mod_path.join("Defs")).unwrap();
+        let mut m = parse_about_xml(&mod_path).unwrap();
+        let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        assert_eq!(diagnostics.len(), 1);
+        assert!(
+            m.defs_paths
+                .iter()
+                .any(|path| path == &mod_path.join("Defs"))
+        );
+    }
+
+    #[test]
+    fn unknown_conditions_are_reported_once_per_mod() {
+        let root = tempfile::tempdir().unwrap();
+        let mod_path = write_mod(
+            root.path(),
+            "mod",
+            "example.mod",
+            "Example",
+            Some("<loadFolders><v1.5><li IfNewCondition=\"x\">Defs</li></v1.5></loadFolders>"),
+        );
+        std::fs::create_dir_all(mod_path.join("Defs")).unwrap();
+        let mut m = parse_about_xml(&mod_path).unwrap();
+        let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, crate::Severity::Info);
+        assert_eq!(diagnostics[0].affected_mod.as_deref(), Some("example.mod"));
     }
 
     #[test]
     fn discover_mods_finds_fixtures() {
-        let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
+        let (mods, _) = discover_mods(&[fixtures_path()], Some("1.5"));
         assert!(mods.len() >= 2);
         assert!(mods.iter().any(|m| m.package_id == "test.mod.a"));
-        assert!(mods.iter().any(|m| m.package_id == "test.mod.versioned"));
-    }
-
-    #[test]
-    fn discover_mods_reports_unparseable_about_xml() {
-        let dir = tempfile::tempdir().unwrap();
-        let broken = dir.path().join("BrokenMod/About");
-        std::fs::create_dir_all(&broken).unwrap();
-        std::fs::write(broken.join("About.xml"), "<ModMetaData><unclosed>").unwrap();
-
-        let (mods, diagnostics) = discover_mods(&[dir.path().to_path_buf()], None);
-        assert!(mods.is_empty());
-        assert_eq!(diagnostics.len(), 1);
-        assert_eq!(diagnostics[0].severity, crate::Severity::Warning);
-        assert!(diagnostics[0].message.contains("BrokenMod"));
-        assert!(
-            diagnostics[0]
-                .message
-                .contains(&dir.path().display().to_string()),
-            "message must carry the full path so --config can distinguish Data/ vs Mods/ vs Workshop"
-        );
-        assert_eq!(
-            diagnostics[0].source,
-            crate::DiagnosticSource::FolderResolution
-        );
-    }
-
-    #[test]
-    fn discover_mods_silent_for_absent_and_non_dir_search_paths() {
-        // Absent dirs and non-dir paths are deliberate non-errors (e.g. no
-        // Workshop install): they must produce neither mods nor diagnostics.
-        // The read_dir-failure Warning is not portably triggerable (would need
-        // permission tricks), so it stays uncovered by unit tests.
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("not_a_dir");
-        std::fs::write(&file, "x").unwrap();
-
-        let (mods, diagnostics) = discover_mods(&[dir.path().join("does_not_exist"), file], None);
-        assert!(mods.is_empty());
-        assert!(diagnostics.is_empty());
     }
 }

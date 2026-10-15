@@ -1,6 +1,7 @@
 use rcd_core::about_xml::parse_about_xml;
+use rcd_core::content_files::mark_base_content;
 use rcd_core::diagnostic::{Diagnostic, DiagnosticSource, about_parse_failure};
-use rcd_core::folder::{discover_mods, resolve_mod_folders};
+use rcd_core::folder::{discover_mods, discover_mods_with_active, resolve_mod_folders_with_active};
 use rcd_core::severity::Severity;
 use rcd_core::types::{LoadOrder, Mod};
 use std::path::{Path, PathBuf};
@@ -53,8 +54,7 @@ pub fn resolve_from_mod_paths(
 
     for path in paths {
         match parse_about_xml(path) {
-            Ok(mut m) => {
-                resolve_mod_folders(&mut m, game_version, None);
+            Ok(m) => {
                 mods.push(m);
             }
             Err(e) => diagnostics.push(about_parse_failure(
@@ -66,6 +66,15 @@ pub fn resolve_from_mod_paths(
         }
     }
 
+    let active = mods
+        .iter()
+        .map(rcd_core::ModSummary::from)
+        .collect::<Vec<_>>();
+    let mut resolution_diagnostics = Vec::new();
+    for m in &mut mods {
+        resolution_diagnostics.extend(resolve_mod_folders_with_active(m, game_version, &active));
+    }
+    diagnostics.extend(resolution_diagnostics);
     mark_base_content(&mut mods);
 
     let load_order = if ordered {
@@ -116,7 +125,8 @@ pub fn resolve_from_config(
         search_dirs.push(workshop);
     }
 
-    let (available, mut diagnostics) = discover_mods(&search_dirs, version.as_deref());
+    let (available, mut diagnostics) =
+        discover_mods_with_active(&search_dirs, version.as_deref(), &config.active_mods);
 
     // Build packageId -> Mod map
     let mut mod_map: std::collections::HashMap<String, Mod> = std::collections::HashMap::new();
@@ -152,15 +162,6 @@ pub fn resolve_from_config(
     }
 }
 
-/// Mark mods from Ludeon Studios (Core, DLCs) as base content.
-fn mark_base_content(mods: &mut [Mod]) {
-    for m in mods {
-        if m.package_id.starts_with("ludeon.") {
-            m.is_base_content = true;
-        }
-    }
-}
-
 /// Walk up from the RimWorld install path to find the Steam Workshop content directory.
 /// RimWorld's Steam app ID is 294100.
 ///
@@ -184,6 +185,94 @@ fn find_steam_workshop(rimworld_path: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn create_mod(root: &Path, folder: &str, package: &str, name: &str, folders: &str) -> PathBuf {
+        let path = root.join(folder);
+        std::fs::create_dir_all(path.join("About")).unwrap();
+        std::fs::write(
+            path.join("About/About.xml"),
+            format!(
+                "<ModMetaData><packageId>{package}</packageId><name>{name}</name></ModMetaData>"
+            ),
+        )
+        .unwrap();
+        std::fs::write(path.join("LoadFolders.xml"), folders).unwrap();
+        std::fs::create_dir_all(path.join("Selected/Defs")).unwrap();
+        path
+    }
+
+    #[test]
+    fn dir_and_explicit_mods_use_all_inputs_as_active() {
+        let root = tempfile::tempdir().unwrap();
+        create_mod(
+            root.path(),
+            "one",
+            "test.one",
+            "One",
+            "<loadFolders><v1.5><li IfModActive=\"test.two\">Selected</li></v1.5></loadFolders>",
+        );
+        create_mod(
+            root.path(),
+            "two",
+            "test.two",
+            "Two",
+            "<loadFolders><v1.5><li>Selected</li></v1.5></loadFolders>",
+        );
+        let dir_result = resolve_from_dir(root.path(), Some("1.5"));
+        assert!(
+            dir_result
+                .mods
+                .iter()
+                .find(|m| m.package_id == "test.one")
+                .unwrap()
+                .defs_paths
+                .iter()
+                .any(|p| p.ends_with("Selected/Defs"))
+        );
+        let paths = [root.path().join("one"), root.path().join("two")];
+        let mods_result = resolve_from_mod_paths(&paths, Some("1.5"), false);
+        assert!(
+            mods_result
+                .mods
+                .iter()
+                .find(|m| m.package_id == "test.one")
+                .unwrap()
+                .defs_paths
+                .iter()
+                .any(|p| p.ends_with("Selected/Defs"))
+        );
+    }
+
+    #[test]
+    fn config_resolves_conditions_from_only_active_mods() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("Data");
+        let mods_dir = root.path().join("Mods");
+        create_mod(
+            &data,
+            "One",
+            "test.one",
+            "One",
+            "<loadFolders><v1.5><li IfModActive=\"test.two\">Selected</li></v1.5></loadFolders>",
+        );
+        create_mod(
+            &mods_dir,
+            "Two",
+            "test.two",
+            "Two",
+            "<loadFolders><v1.5><li>Selected</li></v1.5></loadFolders>",
+        );
+        let config = root.path().join("ModsConfig.xml");
+        std::fs::write(&config, "<ModsConfigData><version>1.5</version><activeMods><li>test.one</li></activeMods></ModsConfigData>").unwrap();
+        let resolved = resolve_from_config(&config, root.path(), None);
+        assert_eq!(resolved.mods.len(), 1);
+        let one = &resolved.mods[0];
+        assert_eq!(one.package_id, "test.one");
+        assert!(
+            one.defs_paths.is_empty(),
+            "inactive discovered mod must not satisfy IfModActive"
+        );
+    }
 
     #[test]
     fn resolve_from_dir_surfaces_broken_mod_alongside_good_ones() {

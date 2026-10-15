@@ -1,5 +1,6 @@
 pub mod about_xml;
 pub mod conflict;
+pub mod content_files;
 pub mod detector;
 pub mod diagnostic;
 pub mod folder;
