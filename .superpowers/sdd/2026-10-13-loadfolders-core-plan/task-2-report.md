@@ -31,7 +31,7 @@
 
 ## Commit and state
 
-Implementation source commit: to be filled after commit.
+Implementation source commit: `df3de34` (`feat(core): add LoadFolders parsing and selection`). The report artifact was updated and committed separately after the source commit.
 No push or merge was performed. Pre-existing untracked `docs/plans/*` files were preserved untouched. No staged files should remain after committing.
 
 ## Concerns / boundaries
