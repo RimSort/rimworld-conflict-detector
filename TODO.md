@@ -22,7 +22,7 @@
 
 - [ ] **`PatchOperationSequence` success attribute** — Parsed but the `success` attribute is not read or used. For static analysis the safer direction is to assume all operations execute, but documenting the limitation would help.
 
-- [x] **`is_base_content` only set in `--config` mode** — `--dir` and `--mods` modes never mark Core/DLC mods. Apply the `ludeon.*` heuristic in all resolution paths. *Note: FFI path (`rcd_analyze`) still does not apply this heuristic — see review findings above.*
+- [x] **Shared `is_base_content` classification** — The `ludeon.*` heuristic now marks Core/DLC mods across `--config`, `--dir`, `--mods`, and FFI (`rcd_analyze`) resolution paths.
 
 - [x] **FFI timestamp empty** — `rcd_analyze` sets `timestamp: String::new()`. Should use a real ISO 8601 timestamp (add chrono as an rcd-ffi dependency or pass it through the config JSON).
 
@@ -94,9 +94,9 @@
 
 - [ ] **`pub mod` leaks implementation details in rcd-xml and rcd-harmony** — Both crates declare all submodules as `pub mod`, exposing internal types (`ModDefs`, `ParsedDef`, `DiscoveredPatch`, etc.) when only `XmlDetector`/`HarmonyDetector` are consumed externally. Should be `mod` with selective re-exports.
 
-- [ ] **FFI progress callback `phase` pointer lifetime undocumented** — `crates/rcd-ffi/src/lib.rs:6`. The `CString` is dropped at end of closure, so `*const c_char` is only valid during synchronous callback. If C# consumer retains the pointer, it's use-after-free. Safety contract should document this.
+- [x] **FFI progress callback `phase` pointer lifetime documented** — `crates/rcd-ffi/src/lib.rs:8` documents that the pointer is valid only during the synchronous callback invocation; consumers must copy the string if they need to retain it.
 
-- [ ] **FFI config uses untyped JSON with no schema validation** — `crates/rcd-ffi/src/lib.rs:30-46`. Manual `serde_json::Value` indexing — misspelled fields silently produce defaults, type mismatches silently produce empty results. Should use a typed `RcdConfig` struct with `#[derive(Deserialize)]`.
+- [x] **Typed FFI configuration validation** — `crates/rcd-ffi/src/lib.rs:11-21` defines `RcdConfig` with `#[derive(Deserialize)]`. Invalid types for known fields error, unknown fields produce a Warning, and omitted fields retain their defaults.
 
 ## Follow-ups (final-review backlog)
 

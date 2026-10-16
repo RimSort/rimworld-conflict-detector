@@ -211,7 +211,10 @@ fn read_xpath_from_operation(
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
 
                 if depth == 2 && tag == "xpath" {
-                    xpath = read_element_text(reader, "xpath", source, errors);
+                    // reader-level trim_text does not reach CDATA, so trim here
+                    // exactly like the <li> text list does.
+                    xpath = read_element_text(reader, "xpath", source, errors)
+                        .map(|text| text.trim().to_string());
                     depth -= 1;
                 }
             }
@@ -947,6 +950,42 @@ mod tests {
         assert_eq!(
             ops.iter().map(|op| op.xpath.as_str()).collect::<Vec<_>>(),
             ["", "Defs/Comment", "Defs/CData", "Defs/Next"]
+        );
+    }
+
+    #[test]
+    fn cdata_padding_in_xpath_is_trimmed_so_normalization_resolves() {
+        // Qwen review M-2: quick-xml's trim_text does not apply to CDATA, so
+        // `<xpath><![CDATA[ Defs/ThingDef ]]></xpath>` kept its padding and
+        // normalize_xpath could not find the def type. Predicated CDATA text
+        // happened to resolve, which is why this test pins both forms.
+        use crate::xpath::normalize_xpath;
+        let xml = r#"<Patch>
+            <Operation Class="PatchOperationRemove"><xpath><![CDATA[ Defs/ThingDef ]]></xpath></Operation>
+            <Operation Class="PatchOperationRemove"><xpath><![CDATA[ Defs/ThingDef[defName="Steel"] ]]></xpath></Operation>
+            <Operation Class="PatchOperationRemove"><xpath><![CDATA[Defs/CData]]></xpath></Operation>
+            <Operation Class="PatchOperationRemove"><xpath>Defs/Plain</xpath></Operation>
+        </Patch>"#;
+
+        let (ops, errors) = parse_patches_from_xml(xml, "cdata-xpath.xml");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(
+            ops.iter().map(|op| op.xpath.as_str()).collect::<Vec<_>>(),
+            [
+                "Defs/ThingDef",
+                "Defs/ThingDef[defName=\"Steel\"]",
+                "Defs/CData",
+                "Defs/Plain"
+            ],
+            "parser output must match the trimmed <li> list path"
+        );
+        assert_eq!(
+            normalize_xpath(&ops[0].xpath).def_type.as_deref(),
+            Some("ThingDef")
+        );
+        assert_eq!(
+            normalize_xpath(&ops[1].xpath).def_name.as_deref(),
+            Some("Steel")
         );
     }
 

@@ -23,8 +23,14 @@
 - Preserve def-root attributes, canonicalize attribute order and equivalent entity spellings, and explain root-attribute differences in replacement findings.
 - Consume empty, commented, and CDATA XPath/list text without losing following operations; expose decoding failures rather than silently discarding text.
 - Propagate LoadFolders directory-inspection errors and validate XML structure explicitly.
+- Ignore self-closing markup nested inside a `LoadFolders.xml` folder entry so it cannot inject an extra root-folder entry.
+- Name every rejected `LoadFolders.xml` folder path in the selection warning, and keep the empty-selection status alongside those details.
+- Keep `--config` folder diagnostics scoped to the mods the report actually scanned, without dropping unresolved active-mod warnings.
+- Report differing def-root attributes in a fixed order so repeated scans of the same corpus list the same `divergent_fields`.
+- Trim whitespace padded `CDATA` XPath text so the operation is normalized and analyzed like plain-text XPath.
 
 ### Documentation
 
 - Clarify that the FFI progress callback's phase pointer is valid only during the synchronous callback.
 - Document conservative static treatment of `PatchOperationSequence.success` rather than simulating runtime outcomes.
+- Document the 50 MiB XML and 64-level patch-operation ceilings and that implicit fallback covers version, `Common/`, and the mod root.

@@ -141,9 +141,6 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                     if normalize_game_version(version).is_some() {
                         current_version = Some(version.to_owned());
                         ensure_version(&mut result, version);
-                    } else if name == "default" {
-                        current_version = Some("default".to_owned());
-                        result.default_entries.get_or_insert_with(Vec::new);
                     } else {
                         current_entry = Some(parse_entry(
                             &start,
@@ -184,6 +181,10 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                     }
                     in_root = true;
                     root_closed = true;
+                } else if current_entry.is_some() {
+                    // Nested self-closing markup belongs to the entry in
+                    // progress, not to the version block: it contributes no
+                    // folder path (mirrors the Event::Start entry guard).
                 } else if current_version.is_some() {
                     let entry = parse_entry(&start, &reader, &mut result.unknown_conditions)?;
                     append_entry(&mut result, current_version.as_deref().unwrap(), entry);
@@ -194,9 +195,6 @@ fn parse_load_folders(xml: &str) -> Result<LoadFolders, LoadFoldersError> {
                     .filter(|v| normalize_game_version(v).is_some())
                 {
                     ensure_version(&mut result, version);
-                } else if current_version.is_some() {
-                    let entry = parse_entry(&start, &reader, &mut result.unknown_conditions)?;
-                    append_entry(&mut result, current_version.as_deref().unwrap(), entry);
                 }
             }
             Event::Text(value) if current_entry.is_some() => text.push_str(&value.unescape()?),
@@ -374,18 +372,27 @@ fn select_folders(
     let mut selected = Vec::new();
     for entry in entries {
         if validate_folder_path(&entry.path).is_err() {
-            diagnostics.push(folder_warning(format!(
+            diagnostics.push(format!(
                 "Invalid LoadFolders.xml folder path {:?}; skipping entry",
                 entry.path
-            )));
+            ));
         } else if entry.matches(active) {
             selected.push(entry);
         }
     }
+    // One singular diagnostic, but no rejected entry is hidden: every invalid
+    // path is named, and an empty selection keeps its own status wording.
     let diagnostic = if selected.is_empty() {
-        Some(folder_warning("LoadFolders.xml selected no folders"))
+        let mut message = String::from("LoadFolders.xml selected no folders");
+        for detail in &diagnostics {
+            message.push_str("; ");
+            message.push_str(detail);
+        }
+        Some(folder_warning(message))
+    } else if diagnostics.is_empty() {
+        None
     } else {
-        diagnostics.into_iter().next()
+        Some(folder_warning(diagnostics.join("; ")))
     };
     FolderSelection {
         entries: Some(selected),
@@ -533,6 +540,98 @@ mod tests {
                 .map(|entry| entry.path.as_str())
                 .collect::<Vec<_>>(),
             ["onetwothree", "sibling"]
+        );
+    }
+
+    #[test]
+    fn nested_self_closing_markup_inside_entry_does_not_add_a_root_entry() {
+        // Qwen review I-1: the Event::Empty arm had no `current_entry` guard, so
+        // `<li>Mods/Foo<note/></li>` appended a second entry with an empty path
+        // — which validate_folder_path maps to the mod root.
+        let parsed = LoadFolders::parse_str(
+            "<loadFolders><v1.5><li>Mods/Foo<note/></li></v1.5></loadFolders>",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.version_entries[0]
+                .1
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["Mods/Foo"]
+        );
+        let selected = parsed.select(Some("1.5"), &[]);
+        assert_eq!(
+            selected
+                .entries
+                .unwrap()
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["Mods/Foo"],
+            "nested self-closing markup must not inject the mod root"
+        );
+    }
+
+    #[test]
+    fn every_invalid_folder_path_is_named_even_when_nothing_remains() {
+        // Qwen review M-1: with an empty selection the whole invalid-path detail
+        // list was dropped in favour of the generic empty-selection warning.
+        let parsed = LoadFolders::parse_str(
+            "<loadFolders><v1.5><li>../escape</li><li>/abs</li></v1.5></loadFolders>",
+        )
+        .unwrap();
+        let selection = parsed.select(Some("1.5"), &[]);
+        assert_eq!(selection.entries, Some(vec![]));
+        let message = selection.diagnostic.unwrap().message;
+        assert!(
+            message.contains("LoadFolders.xml selected no folders"),
+            "empty-selection status must survive: {message}"
+        );
+        assert!(
+            message.contains("../escape") && message.contains("/abs"),
+            "both rejected paths must be named: {message}"
+        );
+    }
+
+    #[test]
+    fn all_invalid_paths_are_named_when_a_valid_sibling_exists() {
+        // Qwen review M-1: only the first rejected entry was reported when some
+        // folders were still selected.
+        let parsed = LoadFolders::parse_str(
+            "<loadFolders><v1.5><li>../escape</li><li>/abs</li><li>Good</li></v1.5></loadFolders>",
+        )
+        .unwrap();
+        let selection = parsed.select(Some("1.5"), &[]);
+        assert_eq!(
+            selection
+                .entries
+                .unwrap()
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            ["Good"]
+        );
+        let message = selection.diagnostic.unwrap().message;
+        assert!(
+            message.contains("../escape") && message.contains("/abs"),
+            "every rejected path must be named: {message}"
+        );
+    }
+
+    #[test]
+    fn empty_selection_without_invalid_paths_keeps_the_existing_wording() {
+        // Guard for M-1: nothing was rejected, so the message stays exactly as
+        // published (no invented "skipped 0 entries" detail).
+        let parsed = LoadFolders::parse_str(
+            "<loadFolders><v1.5><li IfModActive=\"absent\">Only</li></v1.5></loadFolders>",
+        )
+        .unwrap();
+        let selection = parsed.select(Some("1.5"), &[]);
+        assert_eq!(selection.entries, Some(vec![]));
+        assert_eq!(
+            selection.diagnostic.unwrap().message,
+            "LoadFolders.xml selected no folders"
         );
     }
 

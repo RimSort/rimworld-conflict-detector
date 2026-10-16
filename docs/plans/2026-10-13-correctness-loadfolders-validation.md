@@ -45,3 +45,13 @@ These traces establish recovered conditional/versioned content for representativ
 - `PatchOperationSequence.success` is not evaluated; contained operations are conservatively analyzed.
 - The corpus audit is sampled, not exhaustive. Counts alone cannot distinguish every real incompatibility from a conservative static-analysis finding.
 - No push or merge was performed. The feature branch is retained for user review.
+
+## Post-review fix validation
+
+A subsequent Qwen3.8 Max review of `5d616bc` identified nine actionable findings. Parent verification reproduced the five behavioral findings and confirmed the four cleanup/documentation findings from source. The fix set adds 11 regression tests covering nested self-closing folder markup, retained invalid-path details, active-only config folder diagnostics (including the exit-code regression and preservation of missing-active warnings), root-attribute field ordering, and padded CDATA XPath normalization.
+
+The fix set passed a fresh `just ci` and `cargo clippy --workspace --all-targets -- -D warnings`: **227 passed, one pre-existing ignored, zero failures**, with formatting and workspace build passing. Behavioral assertion-level RED/GREEN evidence was recorded for the bug fixes; the pre-fix randomized attribute-order test failed in five separate invocations, with 64 independent comparisons per invocation. Dead-code/dependency cleanup and documentation updates do not have behavioral RED assertions.
+
+An independent Qwen3.8 Max re-review verified the code fixes and regression-test discrimination. A scoped follow-up verified the corrected documentation; all nine findings were closed with no remaining findings in that review.
+
+The corpus figures above predate these review fixes. No new full-corpus scan was performed for the fix set; those earlier figures must not be represented as a scan of the post-review source. The existing sampled-audit and output-volume limitations remain unchanged.

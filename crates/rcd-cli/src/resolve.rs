@@ -155,6 +155,20 @@ pub fn resolve_from_config(
 
     mark_base_content(&mut mods);
 
+    // Discovery resolved every candidate mod, but only the retained set is
+    // reported in `mods_scanned`. Drop exactly that surplus: FolderResolution
+    // diagnostics scoped to a mod that was not retained. Unscoped discovery
+    // warnings, retained mods' folder diagnostics, and the MetadataResolution
+    // warnings for unresolved active ids all stay.
+    let retained: std::collections::HashSet<&str> =
+        mods.iter().map(|m| m.package_id.as_str()).collect();
+    diagnostics.retain(|d| {
+        !(d.source == DiagnosticSource::FolderResolution
+            && d.affected_mod
+                .as_deref()
+                .is_some_and(|id| !retained.contains(id)))
+    });
+
     ResolvedMods {
         mods,
         load_order: Some(config.load_order()),
@@ -396,6 +410,107 @@ mod tests {
         assert_eq!(
             resolved.diagnostics[1].affected_mod.as_deref(),
             Some("brokenmod")
+        );
+    }
+
+    #[test]
+    fn config_drops_folder_diagnostics_for_mods_that_are_not_scanned() {
+        // Qwen review I-2: discovery resolves every candidate, but only the
+        // configured active set reaches `mods_scanned`. Publishing folder
+        // diagnostics for discarded candidates breaks the report contract and
+        // can flip the exit code to 2 for an intentionally empty load order.
+        let root = tempfile::tempdir().unwrap();
+        let mods_dir = root.path().join("Mods");
+        create_mod(
+            &mods_dir,
+            "Inactive",
+            "test.inactive",
+            "Inactive",
+            "<loadFolders><v1.5><li>broken</loadFolders>",
+        );
+        let config = root.path().join("ModsConfig.xml");
+        std::fs::write(
+            &config,
+            "<ModsConfigData><version>1.5</version><activeMods></activeMods></ModsConfigData>",
+        )
+        .unwrap();
+
+        let resolved = resolve_from_config(&config, root.path(), None);
+        assert!(resolved.mods.is_empty());
+        assert!(
+            resolved.diagnostics.is_empty(),
+            "unscanned candidates must not contribute diagnostics: {:?}",
+            resolved
+                .diagnostics
+                .iter()
+                .map(|d| (&d.source, d.affected_mod.as_deref(), d.message.as_str()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn config_keeps_active_folder_diagnostics_and_drops_inactive_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let mods_dir = root.path().join("Mods");
+        let malformed = "<loadFolders><v1.5><li>broken</loadFolders>";
+        create_mod(&mods_dir, "Active", "test.active", "Active", malformed);
+        create_mod(
+            &mods_dir,
+            "Inactive",
+            "test.inactive",
+            "Inactive",
+            malformed,
+        );
+        let config = root.path().join("ModsConfig.xml");
+        std::fs::write(
+            &config,
+            "<ModsConfigData><version>1.5</version><activeMods><li>test.active</li></activeMods></ModsConfigData>",
+        )
+        .unwrap();
+
+        let resolved = resolve_from_config(&config, root.path(), None);
+        assert_eq!(resolved.mods.len(), 1);
+        assert_eq!(
+            resolved
+                .diagnostics
+                .iter()
+                .map(|d| (&d.source, d.affected_mod.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![(
+                &rcd_core::DiagnosticSource::FolderResolution,
+                Some("test.active")
+            )],
+            "only the retained mod's folder diagnostic may survive: {:?}",
+            resolved
+                .diagnostics
+                .iter()
+                .map(|d| d.message.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn config_keeps_metadata_warning_for_an_active_mod_that_was_not_found() {
+        // Guards against the reviewer's blanket `retain` by scanned ids: an
+        // unresolved ACTIVE mod carries affected_mod but is not in `mods`.
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("ModsConfig.xml");
+        std::fs::write(
+            &config,
+            "<ModsConfigData><version>1.5</version><activeMods><li>test.absent</li></activeMods></ModsConfigData>",
+        )
+        .unwrap();
+
+        let resolved = resolve_from_config(&config, root.path(), None);
+        assert!(resolved.mods.is_empty());
+        assert_eq!(resolved.diagnostics.len(), 1);
+        assert_eq!(
+            resolved.diagnostics[0].source,
+            rcd_core::DiagnosticSource::MetadataResolution
+        );
+        assert_eq!(
+            resolved.diagnostics[0].affected_mod.as_deref(),
+            Some("test.absent")
         );
     }
 

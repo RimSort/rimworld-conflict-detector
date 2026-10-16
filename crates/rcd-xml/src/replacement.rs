@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rcd_core::{Conflict, DefConflict, DefConflictMechanism, DefTarget, LoadOrder, ModSummary};
 
@@ -201,7 +201,15 @@ fn find_divergent_fields(
         if base_normalized != other_normalized {
             let base_attributes = extract_root_attributes(&entries[0].1, def_id, errors);
             let other_attributes = extract_root_attributes(&entry.1, def_id, errors);
-            for name in base_attributes.keys().chain(other_attributes.keys()) {
+            // Canonical order: each map is ordered, but chaining the two key
+            // sets is only sorted when both sides carry the same attributes.
+            let mut attribute_names = base_attributes
+                .keys()
+                .chain(other_attributes.keys())
+                .collect::<Vec<_>>();
+            attribute_names.sort_unstable();
+            attribute_names.dedup();
+            for name in attribute_names {
                 if base_attributes.get(name) != other_attributes.get(name) {
                     let field = format!("@{name}");
                     if !divergent.contains(&field) {
@@ -258,11 +266,14 @@ fn canonical_attrs(
 }
 
 /// Reads the root element attributes for root-attribute field reporting.
+///
+/// Ordered keys: `divergent_fields` inherits this iteration order, so a map
+/// with randomized ordering would make the reported field list run-dependent.
 fn extract_root_attributes(
     xml: &str,
     def_id: &str,
     errors: &mut Vec<String>,
-) -> HashMap<String, String> {
+) -> BTreeMap<String, String> {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -281,7 +292,7 @@ fn extract_root_attributes(
                             value.into_owned(),
                         ))
                     })
-                    .collect::<Result<HashMap<_, _>, quick_xml::Error>>()
+                    .collect::<Result<BTreeMap<_, _>, quick_xml::Error>>()
                     .map_err(|error| {
                         errors.push(format!(
                             "internal XML reconstruction error for {def_id}: attribute decode failed: {error}"
@@ -289,12 +300,12 @@ fn extract_root_attributes(
                     })
                     .unwrap_or_default();
             }
-            Ok(Event::Eof) => return HashMap::new(),
+            Ok(Event::Eof) => return BTreeMap::new(),
             Err(error) => {
                 errors.push(format!(
                     "internal XML reconstruction error for {def_id}: {error}"
                 ));
-                return HashMap::new();
+                return BTreeMap::new();
             }
             _ => {}
         }
@@ -803,6 +814,88 @@ mod tests {
             panic!("expected direct replacement")
         };
         assert_eq!(divergent_fields, &["@Name"]);
+    }
+
+    #[test]
+    fn multiple_differing_root_attributes_have_a_fixed_order() {
+        // Qwen review I-3: `extract_root_attributes` returned a HashMap, whose
+        // iteration order is randomized per process instance, so two differing
+        // root attributes reached `divergent_fields` in either order. Repeated
+        // calls discriminate reliably; a single call could pass by luck.
+        let make = |package: &str, name: &str, parent: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: format!(
+                    "<ThingDef Name=\"{name}\" ParentName=\"{parent}\"><defName>Steel</defName></ThingDef>"
+                ),
+                source_file: format!("{package}.xml"),
+            }],
+        };
+        let mods = [
+            make("test.mod.a", "X", "BaseA"),
+            make("test.mod.b", "Y", "BaseB"),
+        ];
+        let mut observed = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            let (conflicts, errors) = detect_replacements(&mods, None);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+            let Conflict::Def(conflict) = &conflicts[0] else {
+                panic!("expected def conflict")
+            };
+            let DefConflictMechanism::DirectReplacement { divergent_fields } = &conflict.mechanism
+            else {
+                panic!("expected direct replacement")
+            };
+            observed.insert(divergent_fields.clone());
+        }
+        assert_eq!(
+            observed
+                .into_iter()
+                .map(|fields| fields.join(","))
+                .collect::<Vec<_>>(),
+            vec!["@Name,@ParentName"],
+            "root attributes must be reported once, in sorted order"
+        );
+    }
+
+    #[test]
+    fn divergent_root_attributes_are_reported_in_canonical_union_order() {
+        // Complements the repeated-call test: attributes held by only one side
+        // must still land in sorted order, not base-then-other chain order.
+        let make = |package: &str, xml: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: xml.into(),
+                source_file: format!("{package}.xml"),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make(
+                    "test.mod.a",
+                    "<ThingDef Zeta=\"1\"><defName>Steel</defName></ThingDef>",
+                ),
+                make(
+                    "test.mod.b",
+                    "<ThingDef Alpha=\"2\"><defName>Steel</defName></ThingDef>",
+                ),
+            ],
+            None,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let Conflict::Def(conflict) = &conflicts[0] else {
+            panic!("expected def conflict")
+        };
+        let DefConflictMechanism::DirectReplacement { divergent_fields } = &conflict.mechanism
+        else {
+            panic!("expected direct replacement")
+        };
+        assert_eq!(divergent_fields, &["@Alpha", "@Zeta"]);
     }
 
     #[test]

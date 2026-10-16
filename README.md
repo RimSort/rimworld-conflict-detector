@@ -97,9 +97,19 @@ supplied mods form the active set, while `--config` uses the configured active
 mods. For the requested version, selection prefers an exact entry, then the
 greatest lower version entry; if neither applies, it uses `default` when present.
 A malformed `LoadFolders.xml`, or the absence of both an applicable version
-entry and a `default` entry, warns and falls back to implicit versioned/Common
-folder selection. A selected entry that intentionally lists no content folders
-stays empty. Game version 1.0 uses implicit folder resolution.
+entry and a `default` entry, warns and falls back to implicit folder selection,
+which searches the requested version folder, then `Common/`, then the mod root,
+in that priority order. A selected entry that intentionally lists no content
+folders stays empty. Game version 1.0 uses implicit folder resolution.
+
+Two ceilings bound pathological input: every XML input (`About.xml`,
+`ModsConfig.xml`, `LoadFolders.xml`, and Defs/Patches files) larger than 50 MiB
+is skipped whole, and patch operations nested more than 64 levels deep are
+skipped along with their subtree while sibling operations are still analyzed.
+Both cases emit diagnostics; severity depends on the input and resolution
+route. Oversized `ModsConfig.xml` and explicitly supplied `About.xml` inputs
+produce Errors; the patch-depth limit and skipped Defs/Patches files produce
+Warnings. Managed DLL assemblies are not size-limited.
 
 Patch analysis is static: `PatchOperationSequence` operations are treated as
 executing, and the sequence's `success` branch behavior is not evaluated.
