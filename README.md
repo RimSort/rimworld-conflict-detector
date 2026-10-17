@@ -69,6 +69,51 @@ remain skipped by design, as not every install has all three.
 The table describes `rcd scan`. `rcd list-mods` exits `2` whenever it lists no
 mods — including an empty but valid input with no diagnostics.
 
+### JSON Output
+
+`rcd scan --format json` emits a report with `schema_version: 2`. The version
+covers the aggregated non-overlapping same-def XPath Info conflict mechanism,
+whose serialized mechanism tag is `xpath_same_def_non_overlap` and whose
+`xpath_pairs` contain the paired XPath expressions.
+
+`rcd list-mods --format json` always emits an object with both `mods` and
+`diagnostics` arrays, including when discovery is partial or finds no mods:
+
+```json
+{
+  "mods": [],
+  "diagnostics": []
+}
+```
+
+Resolution diagnostics are included in this envelope rather than printed as
+non-JSON stderr text. The command retains its existing exit codes.
+
+### Folder and Patch Analysis Limits
+
+When a mod has `LoadFolders.xml`, folder selection uses the requested game
+version (revision suffixes are normalized); for `--dir` and `--mods`, the
+supplied mods form the active set, while `--config` uses the configured active
+mods. For the requested version, selection prefers an exact entry, then the
+greatest lower version entry; if neither applies, it uses `default` when present.
+A malformed `LoadFolders.xml`, or the absence of both an applicable version
+entry and a `default` entry, warns and falls back to implicit folder selection,
+which searches the requested version folder, then `Common/`, then the mod root,
+in that priority order. A selected entry that intentionally lists no content
+folders stays empty. Game version 1.0 uses implicit folder resolution.
+
+Two ceilings bound pathological input: every XML input (`About.xml`,
+`ModsConfig.xml`, `LoadFolders.xml`, and Defs/Patches files) larger than 50 MiB
+is skipped whole, and patch operations nested more than 64 levels deep are
+skipped along with their subtree while sibling operations are still analyzed.
+Both cases emit diagnostics; severity depends on the input and resolution
+route. Oversized `ModsConfig.xml` and explicitly supplied `About.xml` inputs
+produce Errors; the patch-depth limit and skipped Defs/Patches files produce
+Warnings. Managed DLL assemblies are not size-limited.
+
+Patch analysis is static: `PatchOperationSequence` operations are treated as
+executing, and the sequence's `success` branch behavior is not evaluated.
+
 ## Building
 
 Requires Rust 1.85+ (edition 2024).

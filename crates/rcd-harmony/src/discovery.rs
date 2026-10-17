@@ -1,3 +1,4 @@
+use rcd_core::content_files::collect_files_with_precedence;
 use std::path::{Path, PathBuf};
 
 /// DLL file-stem prefixes to skip during assembly discovery.
@@ -13,58 +14,31 @@ const SKIP_PREFIXES: &[&str] = &[
 
 /// Discover mod-specific .dll assemblies in an `Assemblies/` directory.
 ///
-/// Walks the directory (non-recursively) and returns paths to `.dll` files
-/// whose file stem does not start with any of the known framework prefixes.
+/// Recursively walks the directory and returns paths to `.dll` files whose
+/// file stem does not start with any of the known framework prefixes.
 /// Also collects I/O errors encountered during the walk.
 pub fn discover_assemblies(assemblies_dir: &Path) -> (Vec<PathBuf>, Vec<String>) {
-    let mut paths = Vec::new();
-    let mut errors = Vec::new();
+    discover_assemblies_dirs(&[assemblies_dir.to_path_buf()])
+}
 
-    let walker = match walkdir::WalkDir::new(assemblies_dir)
-        .max_depth(1)
+/// Discover mod-specific DLL assemblies from high-priority-first directories.
+/// The first file for each case-sensitive relative path wins across all roots.
+pub fn discover_assemblies_dirs(dirs: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
+    let (files, errors) = collect_files_with_precedence(dirs);
+    let paths = files
         .into_iter()
-        .next()
-    {
-        Some(Ok(_)) => walkdir::WalkDir::new(assemblies_dir).max_depth(1),
-        Some(Err(e)) => {
-            errors.push(format!("Failed to read assemblies directory: {}", e));
-            return (paths, errors);
-        }
-        None => return (paths, errors),
-    };
-
-    for result in walker.into_iter() {
-        let entry = match result {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("Failed to read directory entry: {}", e));
-                continue;
+        .filter(|path| {
+            if !path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
+            {
+                return false;
             }
-        };
 
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if !entry
-            .path()
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("dll"))
-        {
-            continue;
-        }
-
-        let stem = entry
-            .path()
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        if SKIP_PREFIXES.iter().any(|prefix| stem.starts_with(prefix)) {
-            continue;
-        }
-
-        paths.push(entry.into_path());
-    }
-
+            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            !SKIP_PREFIXES.iter().any(|prefix| stem.starts_with(prefix))
+        })
+        .collect();
     (paths, errors)
 }
 
@@ -97,6 +71,36 @@ mod tests {
             .filter_map(|p| p.file_name()?.to_str())
             .collect();
         assert_eq!(names, vec!["MyMod.dll", "SomePatches.dll"]);
+    }
+
+    #[test]
+    fn discover_assemblies_dirs_applies_recursive_relative_path_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let high = temp.path().join("high");
+        let low = temp.path().join("low");
+        fs::create_dir_all(high.join("nested")).unwrap();
+        fs::create_dir_all(low.join("nested")).unwrap();
+        fs::write(high.join("nested/Duplicate.dll"), b"high").unwrap();
+        fs::write(low.join("nested/Duplicate.dll"), b"low").unwrap();
+        fs::write(low.join("nested/Unique.dll"), b"unique").unwrap();
+        fs::write(low.join("nested/readme.txt"), b"ignored").unwrap();
+
+        let (found, errors) = discover_assemblies_dirs(&[high.clone(), low.clone()]);
+        assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
+        let relative: Vec<_> = found
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&high)
+                    .map(|relative| format!("high/{}", relative.display()))
+                    .unwrap_or_else(|_| {
+                        format!("low/{}", path.strip_prefix(&low).unwrap().display())
+                    })
+            })
+            .collect();
+        assert_eq!(
+            relative,
+            vec!["high/nested/Duplicate.dll", "low/nested/Unique.dll"]
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use rcd_core::{Conflict, DefConflict, DefConflictMechanism, DefTarget, LoadOrder, ModSummary};
 
-use crate::def_parser::{ParsedDef, build_attrs_string};
+use crate::def_parser::ParsedDef;
 
 /// A collection of parsed defs associated with a specific mod.
 #[derive(Debug, Clone)]
@@ -54,13 +54,18 @@ pub fn detect_replacements(
         }
 
         // Normalize whitespace for comparison: collapse all runs of whitespace to a single space
+        let errors_before_normalization = errors.len();
         let normalized: Vec<String> = entries
             .iter()
-            .map(|(_, xml)| normalize_whitespace(xml))
+            .map(|(_, xml)| {
+                normalize_whitespace(xml, &format!("{def_type}:{def_name}"), &mut errors)
+            })
             .collect();
 
-        // Check if all normalized XMLs are identical
-        let all_identical = normalized.windows(2).all(|w| w[0] == w[1]);
+        // Invalid text/XML cannot establish semantic equivalence, even when
+        // the malformed source bytes happen to be identical.
+        let all_identical = errors.len() == errors_before_normalization
+            && normalized.windows(2).all(|w| w[0] == w[1]);
         if all_identical {
             continue;
         }
@@ -102,7 +107,7 @@ pub fn detect_replacements(
 /// Normalizes an XML string for semantic comparison by re-parsing it and
 /// rebuilding a canonical form. This strips insignificant whitespace between
 /// tags so that formatting differences don't trigger false conflicts.
-fn normalize_whitespace(s: &str) -> String {
+fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> String {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -116,19 +121,31 @@ fn normalize_whitespace(s: &str) -> String {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                let attrs = build_attrs_string(e);
+                let attrs = match canonical_attrs(e, &reader) {
+                    Ok(attrs) => attrs,
+                    Err(error) => {
+                        errors.push(format!(
+                            "internal XML reconstruction error for {def_id}: {error}"
+                        ));
+                        return format!("!invalid-xml:{s}");
+                    }
+                };
                 result.push_str(&format!("<{tag}{attrs}>"));
             }
             Ok(Event::End(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 result.push_str(&format!("</{tag}>"));
             }
-            Ok(Event::Text(ref t)) => {
-                if let Ok(text) = t.unescape() {
+            Ok(Event::Text(ref t)) => match t.unescape() {
+                Ok(text) => {
                     let trimmed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
                     result.push_str(&trimmed);
                 }
-            }
+                Err(error) => {
+                    errors.push(format!("internal XML reconstruction error for {def_id}: text decode failed: {error}"));
+                    return format!("!invalid-xml:{s}");
+                }
+            },
             Ok(Event::CData(ref c)) => {
                 // CDATA content is already decoded; canonicalize it like Text
                 // so CDATA-only divergences are visible to the comparison
@@ -139,11 +156,24 @@ fn normalize_whitespace(s: &str) -> String {
             }
             Ok(Event::Empty(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
-                let attrs = build_attrs_string(e);
+                let attrs = match canonical_attrs(e, &reader) {
+                    Ok(attrs) => attrs,
+                    Err(error) => {
+                        errors.push(format!(
+                            "internal XML reconstruction error for {def_id}: {error}"
+                        ));
+                        return format!("!invalid-xml:{s}");
+                    }
+                };
                 result.push_str(&format!("<{tag}{attrs}/>"));
             }
             Ok(Event::Eof) => break,
-            Err(_) => return s.split_whitespace().collect::<Vec<_>>().join(" "),
+            Err(error) => {
+                errors.push(format!(
+                    "internal XML reconstruction error for {def_id}: {error}"
+                ));
+                return format!("!invalid-xml:{s}");
+            }
             _ => {}
         }
         buf.clear();
@@ -163,12 +193,30 @@ fn find_divergent_fields(
         return Vec::new();
     }
 
-    let base_normalized = normalize_whitespace(&entries[0].1);
+    let base_normalized = normalize_whitespace(&entries[0].1, def_id, errors);
     let mut divergent = Vec::new();
 
     for entry in &entries[1..] {
-        let other_normalized = normalize_whitespace(&entry.1);
+        let other_normalized = normalize_whitespace(&entry.1, def_id, errors);
         if base_normalized != other_normalized {
+            let base_attributes = extract_root_attributes(&entries[0].1, def_id, errors);
+            let other_attributes = extract_root_attributes(&entry.1, def_id, errors);
+            // Canonical order: each map is ordered, but chaining the two key
+            // sets is only sorted when both sides carry the same attributes.
+            let mut attribute_names = base_attributes
+                .keys()
+                .chain(other_attributes.keys())
+                .collect::<Vec<_>>();
+            attribute_names.sort_unstable();
+            attribute_names.dedup();
+            for name in attribute_names {
+                if base_attributes.get(name) != other_attributes.get(name) {
+                    let field = format!("@{name}");
+                    if !divergent.contains(&field) {
+                        divergent.push(field);
+                    }
+                }
+            }
             // Simple heuristic: find top-level child tags that differ
             let base_tags = extract_child_tags(&entries[0].1, def_id, errors);
             let other_tags = extract_child_tags(&entry.1, def_id, errors);
@@ -190,6 +238,79 @@ fn find_divergent_fields(
     }
 
     divergent
+}
+
+/// Canonicalizes attributes by decoded XML value, then safely re-escapes them.
+fn canonical_attrs(
+    element: &quick_xml::events::BytesStart<'_>,
+    reader: &quick_xml::Reader<&[u8]>,
+) -> Result<String, String> {
+    let mut attributes = Vec::new();
+    for attribute in element.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+        let value = attribute
+            .decode_and_unescape_value(reader.decoder())
+            .map_err(|error| format!("attribute decode failed: {error}"))?;
+        let escaped = value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('"', "&quot;");
+        attributes.push((key, escaped));
+    }
+    attributes.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(attributes
+        .into_iter()
+        .map(|(key, value)| format!(r#" {key}="{value}""#))
+        .collect())
+}
+
+/// Reads the root element attributes for root-attribute field reporting.
+///
+/// Ordered keys: `divergent_fields` inherits this iteration order, so a map
+/// with randomized ordering would make the reported field list run-dependent.
+fn extract_root_attributes(
+    xml: &str,
+    def_id: &str,
+    errors: &mut Vec<String>,
+) -> BTreeMap<String, String> {
+    use quick_xml::events::Event;
+    use quick_xml::reader::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
+                return event
+                    .attributes()
+                    .map(|attribute| {
+                        let attribute = attribute.map_err(quick_xml::Error::from)?;
+                        let value = attribute.decode_and_unescape_value(reader.decoder())?;
+                        Ok((
+                            String::from_utf8_lossy(attribute.key.as_ref()).into_owned(),
+                            value.into_owned(),
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, quick_xml::Error>>()
+                    .map_err(|error| {
+                        errors.push(format!(
+                            "internal XML reconstruction error for {def_id}: attribute decode failed: {error}"
+                        ));
+                    })
+                    .unwrap_or_default();
+            }
+            Ok(Event::Eof) => return BTreeMap::new(),
+            Err(error) => {
+                errors.push(format!(
+                    "internal XML reconstruction error for {def_id}: {error}"
+                ));
+                return BTreeMap::new();
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// Extracts immediate child tag names from a def's raw XML.
@@ -277,10 +398,17 @@ fn extract_tag_content(
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if capture_depth.is_some()
-                    && let Ok(text) = t.unescape()
-                {
-                    captured.push_str(&text);
+                if capture_depth.is_some() {
+                    match t.unescape() {
+                        Ok(text) => captured.push_str(&text),
+                        Err(error) => {
+                            errors.push(format!("internal XML reconstruction error for {def_id}: text decode failed: {error}"));
+                            captured.push_str(&format!(
+                                "!invalid-text:{}",
+                                String::from_utf8_lossy(t.as_ref())
+                            ));
+                        }
+                    }
                 }
             }
             Ok(Event::CData(ref c)) => {
@@ -291,7 +419,7 @@ fn extract_tag_content(
             Ok(Event::End(ref e)) => {
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if capture_depth == Some(depth) && tag == target_tag {
-                    return Some(normalize_whitespace(&captured));
+                    return Some(captured.split_whitespace().collect::<Vec<_>>().join(" "));
                 }
                 if capture_depth.is_some() {
                     captured.push_str(&format!("</{tag}>"));
@@ -655,6 +783,242 @@ mod tests {
             },
             _ => panic!("Expected Conflict::Def"),
         }
+    }
+
+    #[test]
+    fn root_attribute_only_differences_are_reported() {
+        let make = |package: &str, name: &str, nested: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".to_string(),
+                def_name: "Steel".to_string(),
+                raw_xml: format!(
+                    "<ThingDef Name=\"{name}\"><defName>Steel</defName><costList>{nested}</costList></ThingDef>"
+                ),
+                source_file: format!("{package}.xml"),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make("test.mod.a", "base", "<li A=\"1\" B=\"2\">x</li>"),
+                make("test.mod.b", "other", "<li B=\"2\" A=\"1\">x</li>"),
+            ],
+            None,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let Conflict::Def(conflict) = &conflicts[0] else {
+            panic!("expected def conflict")
+        };
+        let DefConflictMechanism::DirectReplacement { divergent_fields } = &conflict.mechanism
+        else {
+            panic!("expected direct replacement")
+        };
+        assert_eq!(divergent_fields, &["@Name"]);
+    }
+
+    #[test]
+    fn multiple_differing_root_attributes_have_a_fixed_order() {
+        // Qwen review I-3: `extract_root_attributes` returned a HashMap, whose
+        // iteration order is randomized per process instance, so two differing
+        // root attributes reached `divergent_fields` in either order. Repeated
+        // calls discriminate reliably; a single call could pass by luck.
+        let make = |package: &str, name: &str, parent: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: format!(
+                    "<ThingDef Name=\"{name}\" ParentName=\"{parent}\"><defName>Steel</defName></ThingDef>"
+                ),
+                source_file: format!("{package}.xml"),
+            }],
+        };
+        let mods = [
+            make("test.mod.a", "X", "BaseA"),
+            make("test.mod.b", "Y", "BaseB"),
+        ];
+        let mut observed = std::collections::BTreeSet::new();
+        for _ in 0..64 {
+            let (conflicts, errors) = detect_replacements(&mods, None);
+            assert!(errors.is_empty(), "{errors:?}");
+            assert_eq!(conflicts.len(), 1, "{conflicts:?}");
+            let Conflict::Def(conflict) = &conflicts[0] else {
+                panic!("expected def conflict")
+            };
+            let DefConflictMechanism::DirectReplacement { divergent_fields } = &conflict.mechanism
+            else {
+                panic!("expected direct replacement")
+            };
+            observed.insert(divergent_fields.clone());
+        }
+        assert_eq!(
+            observed
+                .into_iter()
+                .map(|fields| fields.join(","))
+                .collect::<Vec<_>>(),
+            vec!["@Name,@ParentName"],
+            "root attributes must be reported once, in sorted order"
+        );
+    }
+
+    #[test]
+    fn divergent_root_attributes_are_reported_in_canonical_union_order() {
+        // Complements the repeated-call test: attributes held by only one side
+        // must still land in sorted order, not base-then-other chain order.
+        let make = |package: &str, xml: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: xml.into(),
+                source_file: format!("{package}.xml"),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make(
+                    "test.mod.a",
+                    "<ThingDef Zeta=\"1\"><defName>Steel</defName></ThingDef>",
+                ),
+                make(
+                    "test.mod.b",
+                    "<ThingDef Alpha=\"2\"><defName>Steel</defName></ThingDef>",
+                ),
+            ],
+            None,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        let Conflict::Def(conflict) = &conflicts[0] else {
+            panic!("expected def conflict")
+        };
+        let DefConflictMechanism::DirectReplacement { divergent_fields } = &conflict.mechanism
+        else {
+            panic!("expected direct replacement")
+        };
+        assert_eq!(divergent_fields, &["@Alpha", "@Zeta"]);
+    }
+
+    #[test]
+    fn root_and_nested_attribute_order_is_semantically_irrelevant() {
+        let make = |package: &str, xml: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: xml.into(),
+                source_file: package.into(),
+            }],
+        };
+        let a = make(
+            "test.mod.a",
+            "<ThingDef B=\"2\" A=\"1\"><defName>Steel</defName><node Z=\"9\" Y=\"8\"/></ThingDef>",
+        );
+        let b = make(
+            "test.mod.b",
+            "<ThingDef A=\"1\" B=\"2\"><defName>Steel</defName><node Y=\"8\" Z=\"9\"/></ThingDef>",
+        );
+        let (conflicts, errors) = detect_replacements(&[a, b], None);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(
+            conflicts.is_empty(),
+            "attribute order alone is not semantic: {conflicts:?}"
+        );
+    }
+
+    #[test]
+    fn equivalent_attribute_entities_are_canonical_and_invalid_attributes_are_diagnostic() {
+        let make = |package: &str, xml: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: xml.into(),
+                source_file: package.into(),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make(
+                    "test.mod.a",
+                    "<ThingDef Root=\"A&amp;B\" Other=\"x\"><defName>Steel</defName><node Value=\"A&amp;B\" Other=\"x\"/><empty Value=\"A&amp;B\"/></ThingDef>",
+                ),
+                make(
+                    "test.mod.b",
+                    "<ThingDef Other=\"x\" Root=\"A&#38;B\"><defName>Steel</defName><node Other=\"x\" Value=\"A&#38;B\"/><empty Value=\"A&#38;B\"/></ThingDef>",
+                ),
+            ],
+            None,
+        );
+        assert!(errors.is_empty(), "{errors:?}");
+        assert!(conflicts.is_empty(), "equivalent attributes: {conflicts:?}");
+
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make(
+                    "test.mod.c",
+                    "<ThingDef Root=\"&unknown;\"><defName>Steel</defName></ThingDef>",
+                ),
+                make(
+                    "test.mod.d",
+                    "<ThingDef Root=\"&unknown;\"><defName>Steel</defName></ThingDef>",
+                ),
+            ],
+            None,
+        );
+        assert!(
+            !errors.is_empty(),
+            "invalid attribute entity must be visible"
+        );
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "invalid attributes cannot establish equivalence"
+        );
+    }
+
+    #[test]
+    fn invalid_text_decoding_is_diagnostic_and_not_equivalent() {
+        let make = |package: &str, text: &str| ModDefs {
+            mod_summary: test_mod_summary_named(package, package),
+            defs: vec![ParsedDef {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+                raw_xml: format!(
+                    "<ThingDef><defName>Steel</defName><label>{text}</label></ThingDef>"
+                ),
+                source_file: package.into(),
+            }],
+        };
+        let (conflicts, errors) = detect_replacements(
+            &[
+                make("test.mod.a", "&unknown;"),
+                make("test.mod.b", "distinct"),
+            ],
+            None,
+        );
+        assert!(
+            !errors.is_empty(),
+            "invalid entity decoding must be visible"
+        );
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "bad text must not collapse into a false equivalent"
+        );
+
+        let (identical_invalid_conflicts, identical_invalid_errors) = detect_replacements(
+            &[
+                make("test.mod.c", "&unknown;"),
+                make("test.mod.d", "&unknown;"),
+            ],
+            None,
+        );
+        assert!(!identical_invalid_errors.is_empty());
+        assert_eq!(
+            identical_invalid_conflicts.len(),
+            1,
+            "malformed text cannot establish equivalence"
+        );
     }
 
     #[test]

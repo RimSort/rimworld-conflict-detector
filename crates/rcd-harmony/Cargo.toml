@@ -9,7 +9,6 @@ rcd-core = { workspace = true }
 dotnetdll = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
-walkdir = { workspace = true }
 petgraph = { workspace = true }
 
 [dev-dependencies]

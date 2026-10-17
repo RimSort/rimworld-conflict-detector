@@ -8,10 +8,13 @@
 
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use std::path::Path;
-use walkdir::WalkDir;
+use rcd_core::content_files::collect_files_with_precedence;
+use rcd_core::xml_io::read_xml_file;
+use std::path::{Path, PathBuf};
 
 use crate::def_parser::check_well_formed;
+
+const MAX_OPERATION_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PatchOpType {
@@ -36,43 +39,31 @@ pub struct ParsedPatchOp {
 
 /// Recursively walk a directory and parse all `.xml` files for patch operations.
 pub fn parse_patches_dir(dir: &Path) -> (Vec<ParsedPatchOp>, Vec<String>) {
+    parse_patches_dirs(&[dir.to_path_buf()])
+}
+
+/// Parse XML patch files from high-priority-first directories. The first
+/// directory wins for each case-sensitive relative path.
+pub fn parse_patches_dirs(dirs: &[PathBuf]) -> (Vec<ParsedPatchOp>, Vec<String>) {
+    let (files, mut errors) = collect_files_with_precedence(dirs);
     let mut ops = Vec::new();
-    let mut errors = Vec::new();
-
-    for result in WalkDir::new(dir).into_iter() {
-        let entry = match result {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("Failed to read directory entry: {}", e));
-                continue;
-            }
-        };
-
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if !entry
-            .path()
+    for path in files {
+        if !path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"))
         {
             continue;
         }
-
-        let path = entry.path();
-        match std::fs::read_to_string(path) {
+        match read_xml_file(&path) {
             Ok(contents) => {
                 let source = path.to_string_lossy().to_string();
-                let (parsed_patches, xml_errors) = parse_patches_from_xml(&contents, &source);
-                ops.extend(parsed_patches);
+                let (parsed, xml_errors) = parse_patches_from_xml(&contents, &source);
+                ops.extend(parsed);
                 errors.extend(xml_errors);
             }
-            Err(e) => {
-                errors.push(format!("Failed to read {}: {}", path.display(), e));
-            }
+            Err(error) => errors.push(format!("Failed to read {}: {}", path.display(), error)),
         }
     }
-
     (ops, errors)
 }
 
@@ -104,7 +95,15 @@ pub fn parse_patches_from_xml(xml: &str, source: &str) -> (Vec<ParsedPatchOp>, V
                 if inside_patch && tag == "Operation" {
                     let class = extract_class_attr(e);
                     if let Some(class) = class {
-                        parse_operation(&mut reader, &class, source, None, &mut ops, &mut errors);
+                        parse_operation(
+                            &mut reader,
+                            &class,
+                            source,
+                            None,
+                            1,
+                            &mut ops,
+                            &mut errors,
+                        );
                     } else {
                         // Skip unknown operation without Class
                         skip_current_element_by_depth(&mut reader, source, &mut errors);
@@ -142,9 +141,17 @@ fn parse_operation(
     class: &str,
     source: &str,
     condition: Option<PatchCondition>,
+    operation_depth: usize,
     ops: &mut Vec<ParsedPatchOp>,
     errors: &mut Vec<String>,
 ) {
+    if operation_depth > MAX_OPERATION_DEPTH {
+        errors.push(format!(
+            "Patch operation nesting exceeds maximum depth {MAX_OPERATION_DEPTH} in {source}; skipping operation"
+        ));
+        skip_current_element_by_depth(reader, source, errors);
+        return;
+    }
     match class {
         "PatchOperationReplace"
         | "PatchOperationAdd"
@@ -167,13 +174,15 @@ fn parse_operation(
             }
         }
         "PatchOperationSequence" => {
-            parse_sequence(reader, source, condition, ops, errors);
+            // `PatchOperationSequence.success` runtime behavior is not evaluated;
+            // conservatively assume all contained operations may execute.
+            parse_sequence(reader, source, condition, operation_depth, ops, errors);
         }
         "PatchOperationFindMod" => {
-            parse_find_mod(reader, source, ops, errors);
+            parse_find_mod(reader, source, operation_depth, ops, errors);
         }
         "PatchOperationConditional" => {
-            parse_conditional(reader, source, condition, ops, errors);
+            parse_conditional(reader, source, condition, operation_depth, ops, errors);
         }
         _ => {
             // Unknown operation type — skip it. We don't know the enclosing
@@ -202,18 +211,15 @@ fn read_xpath_from_operation(
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
 
                 if depth == 2 && tag == "xpath" {
-                    // Read the text content of <xpath>
-                    let mut text_buf = Vec::new();
-                    if let Ok(Event::Text(t)) = reader.read_event_into(&mut text_buf)
-                        && let Ok(text) = t.unescape()
-                    {
-                        xpath = Some(text.trim().to_string());
-                    }
-                    // Consume closing </xpath>
-                    let mut end_buf = Vec::new();
-                    let _ = reader.read_event_into(&mut end_buf);
+                    // reader-level trim_text does not reach CDATA, so trim here
+                    // exactly like the <li> text list does.
+                    xpath = read_element_text(reader, "xpath", source, errors)
+                        .map(|text| text.trim().to_string());
                     depth -= 1;
                 }
+            }
+            Ok(Event::Empty(ref e)) if e.name().as_ref() == b"xpath" && depth == 1 => {
+                xpath = Some(String::new());
             }
             Ok(Event::End(_)) => {
                 depth -= 1;
@@ -240,6 +246,7 @@ fn parse_sequence(
     reader: &mut Reader<&[u8]>,
     source: &str,
     condition: Option<PatchCondition>,
+    operation_depth: usize,
     ops: &mut Vec<ParsedPatchOp>,
     errors: &mut Vec<String>,
 ) {
@@ -256,7 +263,15 @@ fn parse_sequence(
                 if tag == "li"
                     && let Some(class) = extract_class_attr(e)
                 {
-                    parse_operation(reader, &class, source, condition.clone(), ops, errors);
+                    parse_operation(
+                        reader,
+                        &class,
+                        source,
+                        condition.clone(),
+                        operation_depth + 1,
+                        ops,
+                        errors,
+                    );
                     // parse_operation consumed through the closing </li>, so adjust depth
                     depth -= 1;
                 }
@@ -283,6 +298,7 @@ fn parse_sequence(
 fn parse_find_mod(
     reader: &mut Reader<&[u8]>,
     source: &str,
+    operation_depth: usize,
     ops: &mut Vec<ParsedPatchOp>,
     errors: &mut Vec<String>,
 ) {
@@ -307,7 +323,15 @@ fn parse_find_mod(
                         let condition = required_mods.first().map(|m| PatchCondition {
                             required_mod: m.clone(),
                         });
-                        parse_operation(reader, &class, source, condition, ops, errors);
+                        parse_operation(
+                            reader,
+                            &class,
+                            source,
+                            condition,
+                            operation_depth + 1,
+                            ops,
+                            errors,
+                        );
                         depth -= 1; // parse_operation consumed through </match>
                     }
                 }
@@ -336,6 +360,7 @@ fn parse_conditional(
     reader: &mut Reader<&[u8]>,
     source: &str,
     condition: Option<PatchCondition>,
+    operation_depth: usize,
     ops: &mut Vec<ParsedPatchOp>,
     errors: &mut Vec<String>,
 ) {
@@ -350,7 +375,15 @@ fn parse_conditional(
 
                 if depth == 2 && (tag == "match" || tag == "nomatch") {
                     if let Some(class) = extract_class_attr(e) {
-                        parse_operation(reader, &class, source, condition.clone(), ops, errors);
+                        parse_operation(
+                            reader,
+                            &class,
+                            source,
+                            condition.clone(),
+                            operation_depth + 1,
+                            ops,
+                            errors,
+                        );
                         depth -= 1;
                     }
                 } else if depth == 2 && tag == "xpath" {
@@ -393,18 +426,14 @@ fn read_li_text_list(
                 depth += 1;
                 let tag = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if tag == "li" && depth == 2 {
-                    // Read the text
-                    let mut text_buf = Vec::new();
-                    if let Ok(Event::Text(t)) = reader.read_event_into(&mut text_buf)
-                        && let Ok(text) = t.unescape()
-                    {
+                    if let Some(text) = read_element_text(reader, "li", source, errors) {
                         items.push(text.trim().to_string());
                     }
-                    // Consume </li>
-                    let mut end_buf = Vec::new();
-                    let _ = reader.read_event_into(&mut end_buf);
                     depth -= 1;
                 }
+            }
+            Ok(Event::Empty(ref e)) if e.name().as_ref() == b"li" && depth == 1 => {
+                items.push(String::new());
             }
             Ok(Event::End(_)) => {
                 depth -= 1;
@@ -423,6 +452,94 @@ fn read_li_text_list(
     }
 
     items
+}
+
+/// Read a text-only element, consuming through its matching end tag. Comments are
+/// ignored and both escaped text and CDATA are accepted. Nested elements are
+/// malformed for these scalar fields, but are consumed to preserve the caller's
+/// position at the next sibling.
+fn read_element_text(
+    reader: &mut Reader<&[u8]>,
+    element: &str,
+    source: &str,
+    errors: &mut Vec<String>,
+) -> Option<String> {
+    let mut text = String::new();
+    let mut nested: Vec<String> = Vec::new();
+    let mut malformed = false;
+    let mut buf = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Text(value)) if nested.is_empty() => match value.unescape() {
+                Ok(value) => text.push_str(&value),
+                Err(error) => {
+                    if !malformed {
+                        errors.push(format!("Malformed <{element}> text in {source}: {error}"));
+                    }
+                    malformed = true;
+                }
+            },
+            Ok(Event::CData(value)) if nested.is_empty() => match value.decode() {
+                Ok(value) => text.push_str(&value),
+                Err(error) => {
+                    if !malformed {
+                        errors.push(format!("Malformed <{element}> text in {source}: {error}"));
+                    }
+                    malformed = true;
+                }
+            },
+            Ok(Event::Start(value)) => {
+                if !malformed {
+                    errors.push(format!("Nested element in <{element}> text in {source}"));
+                }
+                malformed = true;
+                nested.push(String::from_utf8_lossy(value.name().as_ref()).into_owned());
+            }
+            Ok(Event::Empty(_)) => {
+                if !malformed {
+                    errors.push(format!("Nested element in <{element}> text in {source}"));
+                }
+                malformed = true;
+            }
+            Ok(Event::End(value)) => {
+                let name = String::from_utf8_lossy(value.name().as_ref()).into_owned();
+                if name == element {
+                    if !nested.is_empty() && !malformed {
+                        errors.push(format!(
+                            "Mismatched element in <{element}> text in {source}"
+                        ));
+                        malformed = true;
+                    }
+                    return (!malformed).then_some(text);
+                }
+                if let Some(expected) = nested.pop() {
+                    if name != expected && !malformed {
+                        errors.push(format!(
+                            "Mismatched element in <{element}> text in {source}"
+                        ));
+                        malformed = true;
+                    }
+                } else {
+                    if !malformed {
+                        errors.push(format!(
+                            "Mismatched end element in <{element}> text in {source}"
+                        ));
+                    }
+                    return None;
+                }
+            }
+            Ok(Event::Eof) => {
+                errors.push(format!("Unexpected EOF in <{element}> text in {source}"));
+                return None;
+            }
+            Err(error) => {
+                errors.push(format!("XML parse error in {source}: {error}"));
+                return None;
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
 }
 
 /// Extract the `Class` attribute from an element.
@@ -748,6 +865,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_patches_dirs_uses_first_directory_for_duplicate_relative_path() {
+        let high = tempfile::tempdir().unwrap();
+        let low = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(high.path().join("Patches")).unwrap();
+        std::fs::create_dir_all(low.path().join("Patches")).unwrap();
+        std::fs::write(high.path().join("Patches/shared.xml"), r#"<Patch><Operation Class="PatchOperationReplace"><xpath>Defs/High</xpath></Operation></Patch>"#).unwrap();
+        std::fs::write(low.path().join("Patches/shared.xml"), r#"<Patch><Operation Class="PatchOperationReplace"><xpath>Defs/Low</xpath></Operation></Patch>"#).unwrap();
+
+        let (ops, errors) =
+            parse_patches_dirs(&[high.path().to_path_buf(), low.path().to_path_buf()]);
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].xpath, "Defs/High");
+    }
+
+    #[test]
+    fn parse_patches_dirs_skips_oversized_xml_file_with_diagnostic() {
+        let dir = tempfile::tempdir().unwrap();
+        let oversized = dir.path().join("large.xml");
+        let file = std::fs::File::create(&oversized).unwrap();
+        file.set_len(rcd_core::xml_io::MAX_XML_FILE_BYTES + 1)
+            .unwrap();
+
+        let (ops, errors) = parse_patches_dirs(&[dir.path().to_path_buf()]);
+        assert!(ops.is_empty());
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("large.xml"));
+        assert!(errors[0].contains("50 MiB"));
+    }
+
+    #[test]
     fn parse_patches_dir_returns_errors_vec() {
         let dir = tempfile::tempdir().unwrap();
         let patches_dir = dir.path().join("Patches");
@@ -786,6 +934,115 @@ mod tests {
         );
         assert!(!errors.is_empty(), "parse error must be reported");
         assert!(errors.iter().all(|e| e.contains("test.xml")));
+    }
+
+    #[test]
+    fn xpath_text_reader_handles_empty_comments_cdata_and_preserves_siblings() {
+        let xml = r#"<Patch>
+            <Operation Class="PatchOperationReplace"><xpath></xpath></Operation>
+            <Operation Class="PatchOperationReplace"><xpath><!-- before -->Defs/Comment</xpath></Operation>
+            <Operation Class="PatchOperationReplace"><xpath><![CDATA[Defs/CData]]></xpath></Operation>
+            <Operation Class="PatchOperationReplace"><xpath>Defs/Next</xpath></Operation>
+        </Patch>"#;
+
+        let (ops, errors) = parse_patches_from_xml(xml, "xpath-text.xml");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(
+            ops.iter().map(|op| op.xpath.as_str()).collect::<Vec<_>>(),
+            ["", "Defs/Comment", "Defs/CData", "Defs/Next"]
+        );
+    }
+
+    #[test]
+    fn cdata_padding_in_xpath_is_trimmed_so_normalization_resolves() {
+        // Qwen review M-2: quick-xml's trim_text does not apply to CDATA, so
+        // `<xpath><![CDATA[ Defs/ThingDef ]]></xpath>` kept its padding and
+        // normalize_xpath could not find the def type. Predicated CDATA text
+        // happened to resolve, which is why this test pins both forms.
+        use crate::xpath::normalize_xpath;
+        let xml = r#"<Patch>
+            <Operation Class="PatchOperationRemove"><xpath><![CDATA[ Defs/ThingDef ]]></xpath></Operation>
+            <Operation Class="PatchOperationRemove"><xpath><![CDATA[ Defs/ThingDef[defName="Steel"] ]]></xpath></Operation>
+            <Operation Class="PatchOperationRemove"><xpath><![CDATA[Defs/CData]]></xpath></Operation>
+            <Operation Class="PatchOperationRemove"><xpath>Defs/Plain</xpath></Operation>
+        </Patch>"#;
+
+        let (ops, errors) = parse_patches_from_xml(xml, "cdata-xpath.xml");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(
+            ops.iter().map(|op| op.xpath.as_str()).collect::<Vec<_>>(),
+            [
+                "Defs/ThingDef",
+                "Defs/ThingDef[defName=\"Steel\"]",
+                "Defs/CData",
+                "Defs/Plain"
+            ],
+            "parser output must match the trimmed <li> list path"
+        );
+        assert_eq!(
+            normalize_xpath(&ops[0].xpath).def_type.as_deref(),
+            Some("ThingDef")
+        );
+        assert_eq!(
+            normalize_xpath(&ops[1].xpath).def_name.as_deref(),
+            Some("Steel")
+        );
+    }
+
+    #[test]
+    fn malformed_nested_xpath_is_diagnosed_and_following_operation_survives() {
+        let xml = r#"<Patch>
+            <Operation Class="PatchOperationReplace"><xpath><nested>bad</xpath></Operation>
+            <Operation Class="PatchOperationAdd"><xpath>Defs/Survivor</xpath></Operation>
+        </Patch>"#;
+
+        let (ops, errors) = parse_patches_from_xml(xml, "malformed-xpath.xml");
+        assert!(
+            !errors.is_empty(),
+            "malformed xpath content needs a diagnostic"
+        );
+        assert_eq!(ops.len(), 1, "malformed operation should not be emitted");
+        assert_eq!(ops[0].xpath, "Defs/Survivor");
+    }
+
+    #[test]
+    fn li_text_reader_handles_empty_comments_cdata_for_find_mod_and_conditional() {
+        let xml = r#"<Patch>
+            <Operation Class="PatchOperationFindMod"><mods><li></li></mods><match Class="PatchOperationReplace"><xpath>Defs/Empty</xpath></match></Operation>
+            <Operation Class="PatchOperationFindMod"><mods><li><!-- before -->Mod A</li></mods><match Class="PatchOperationReplace"><xpath>Defs/Comment</xpath></match></Operation>
+            <Operation Class="PatchOperationFindMod"><mods><li><![CDATA[Mod B]]></li></mods><match Class="PatchOperationReplace"><xpath>Defs/CData</xpath></match></Operation>
+            <Operation Class="PatchOperationConditional"><xpath>Defs/Test</xpath><match Class="PatchOperationAdd"><xpath>Defs/Conditional</xpath></match><nomatch Class="PatchOperationAdd"><xpath>Defs/NoMatch</xpath></nomatch></Operation>
+            <Operation Class="PatchOperationReplace"><xpath>Defs/Following</xpath></Operation>
+        </Patch>"#;
+
+        let (ops, errors) = parse_patches_from_xml(xml, "li-text.xml");
+        assert!(errors.is_empty(), "unexpected errors: {errors:?}");
+        assert_eq!(ops.len(), 6);
+        assert_eq!(ops[0].condition.as_ref().unwrap().required_mod, "");
+        assert_eq!(ops[1].condition.as_ref().unwrap().required_mod, "Mod A");
+        assert_eq!(ops[2].condition.as_ref().unwrap().required_mod, "Mod B");
+        assert_eq!(ops[3].xpath, "Defs/Conditional");
+        assert_eq!(ops[4].xpath, "Defs/NoMatch");
+        assert_eq!(ops[5].xpath, "Defs/Following");
+    }
+
+    #[test]
+    fn sequence_depth_overflow_skips_subtree_and_preserves_sibling() {
+        let mut xml =
+            String::from(r#"<Patch><Operation Class="PatchOperationSequence"><operations>"#);
+        for _ in 0..65 {
+            xml.push_str(r#"<li Class="PatchOperationSequence"><operations>"#);
+        }
+        xml.push_str(r#"<li Class="PatchOperationAdd"><xpath>Defs/TooDeep</xpath></li>"#);
+        for _ in 0..65 {
+            xml.push_str("</operations></li>");
+        }
+        xml.push_str(r#"</operations></Operation><Operation Class="PatchOperationReplace"><xpath>Defs/Survivor</xpath></Operation></Patch>"#);
+
+        let (ops, errors) = parse_patches_from_xml(&xml, "deep-sequence.xml");
+        assert!(!errors.is_empty(), "depth overflow needs a diagnostic");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].xpath, "Defs/Survivor");
     }
 
     #[test]

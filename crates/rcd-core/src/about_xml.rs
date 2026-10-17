@@ -1,4 +1,5 @@
 use crate::types::Mod;
+use crate::xml_io::read_xml_file;
 use quick_xml::Reader;
 use quick_xml::events::Event;
 use std::path::Path;
@@ -29,7 +30,7 @@ pub enum AboutXmlError {
 /// - loadAfter, loadBefore, forceLoadAfter, forceLoadBefore (all normalized to lowercase)
 pub fn parse_about_xml(mod_root: &Path) -> Result<Mod, AboutXmlError> {
     let about_path = mod_root.join("About/About.xml");
-    let xml_content = std::fs::read_to_string(&about_path)?;
+    let xml_content = read_xml_file(&about_path)?;
     parse_about_xml_str(&xml_content, mod_root)
 }
 

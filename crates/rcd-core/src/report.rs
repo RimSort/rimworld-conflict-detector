@@ -59,7 +59,7 @@ impl Report {
         let total_mods = metadata.mods_scanned.len() as u32;
 
         Report {
-            schema_version: 1,
+            schema_version: 2,
             metadata,
             summary: ReportSummary {
                 total_mods,
@@ -197,7 +197,44 @@ mod tests {
         let report = Report::build(test_metadata(), vec![], vec![]);
         let json = serde_json::to_string_pretty(&report).unwrap();
         let parsed: Report = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.schema_version, 1);
+        assert_eq!(parsed.schema_version, 2);
+    }
+
+    #[test]
+    fn report_serializes_same_def_non_overlap_with_pinned_tag_and_xpath_pairs() {
+        let conflict = Conflict::Def(DefConflict {
+            target: DefTarget {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+            },
+            mods: vec![test_mod_summary("mod.a"), test_mod_summary("mod.b")],
+            mechanism: DefConflictMechanism::XPathSameDefNonOverlap {
+                xpath_pairs: vec![(
+                    "Defs/ThingDef[defName='Steel']/label".into(),
+                    "Defs/ThingDef[defName='Steel']/description".into(),
+                )],
+            },
+            winner: None,
+            condition: None,
+        });
+        let report = Report::build(test_metadata(), vec![conflict], vec![]);
+        let json = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(json["schema_version"], 2);
+        let existing_xpath_overlap = serde_json::to_value(DefConflictMechanism::XPathOverlap {
+            xpath_a: "a".into(),
+            xpath_b: "b".into(),
+            wildcard: false,
+        })
+        .unwrap();
+        assert!(existing_xpath_overlap.get("x_path_overlap").is_some());
+        assert_eq!(
+            json["conflicts"][0]["mechanism"]["xpath_same_def_non_overlap"]["xpath_pairs"],
+            serde_json::json!([[
+                "Defs/ThingDef[defName='Steel']/label",
+                "Defs/ThingDef[defName='Steel']/description"
+            ]])
+        );
     }
 
     #[test]

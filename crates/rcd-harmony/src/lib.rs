@@ -15,7 +15,7 @@ use rcd_core::{
 
 use crate::attributes::DiscoveredPatch;
 use crate::conflict::detect_harmony_conflicts;
-use crate::discovery::discover_assemblies;
+use crate::discovery::discover_assemblies_dirs;
 
 /// Detector that finds Harmony patch conflicts across mods.
 ///
@@ -37,89 +37,87 @@ impl Detector for HarmonyDetector {
                 let mut mod_patches: Vec<DiscoveredPatch> = Vec::new();
                 let mut diagnostics: Vec<Diagnostic> = Vec::new();
 
-                for assemblies_path in &m.assemblies_paths {
-                    let (dlls, discovery_errors) = discover_assemblies(assemblies_path);
-                    for err_msg in discovery_errors {
-                        diagnostics.push(Diagnostic {
-                            affected_mod: Some(mod_summary.package_id.clone()),
-                            severity: Severity::Warning,
-                            message: err_msg,
-                            source: DiagnosticSource::DllParsing,
-                        });
+                let (dlls, discovery_errors) = discover_assemblies_dirs(&m.assemblies_paths);
+                for err_msg in discovery_errors {
+                    diagnostics.push(Diagnostic {
+                        affected_mod: Some(mod_summary.package_id.clone()),
+                        severity: Severity::Warning,
+                        message: err_msg,
+                        source: DiagnosticSource::DllParsing,
+                    });
+                }
+
+                for dll_path in dlls {
+                    let dll_name = dll_path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown.dll")
+                        .to_string();
+
+                    // Wrap parse_harmony_patches in catch_unwind since dotnetdll is
+                    // pre-1.0 and may panic on malformed DLLs.
+                    let parse_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                        crate::attributes::parse_harmony_patches(&dll_path)
+                    }));
+
+                    match parse_result {
+                        Ok(Ok(patches)) => {
+                            mod_patches.extend(patches);
+                        }
+                        Ok(Err(e)) => {
+                            diagnostics.push(Diagnostic {
+                                affected_mod: Some(mod_summary.package_id.clone()),
+                                severity: Severity::Warning,
+                                message: format!(
+                                    "Failed to parse Harmony patches from {}: {}",
+                                    dll_name, e
+                                ),
+                                source: DiagnosticSource::DllParsing,
+                            });
+                        }
+                        Err(_) => {
+                            diagnostics.push(Diagnostic {
+                                affected_mod: Some(mod_summary.package_id.clone()),
+                                severity: Severity::Warning,
+                                message: format!(
+                                    "DLL parser panicked while parsing {} (dotnetdll crash caught)",
+                                    dll_name
+                                ),
+                                source: DiagnosticSource::DllParsing,
+                            });
+                        }
                     }
 
-                    for dll_path in dlls {
-                        let dll_name = dll_path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("unknown.dll")
-                            .to_string();
-
-                        // Wrap parse_harmony_patches in catch_unwind since dotnetdll is
-                        // pre-1.0 and may panic on malformed DLLs.
-                        let parse_result = panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                            crate::attributes::parse_harmony_patches(&dll_path)
+                    // Best-effort manual patch detection via string scanning
+                    let manual_result =
+                        panic::catch_unwind(panic::AssertUnwindSafe(|| {
+                            crate::manual::detect_manual_patches(&dll_path)
                         }));
 
-                        match parse_result {
-                            Ok(Ok(patches)) => {
-                                mod_patches.extend(patches);
-                            }
-                            Ok(Err(e)) => {
+                    match manual_result {
+                        Ok(hints) => {
+                            for hint in hints {
                                 diagnostics.push(Diagnostic {
                                     affected_mod: Some(mod_summary.package_id.clone()),
-                                    severity: Severity::Warning,
+                                    severity: Severity::Info,
                                     message: format!(
-                                        "Failed to parse Harmony patches from {}: {}",
-                                        dll_name, e
-                                    ),
-                                    source: DiagnosticSource::DllParsing,
-                                });
-                            }
-                            Err(_) => {
-                                diagnostics.push(Diagnostic {
-                                    affected_mod: Some(mod_summary.package_id.clone()),
-                                    severity: Severity::Warning,
-                                    message: format!(
-                                        "DLL parser panicked while parsing {} (dotnetdll crash caught)",
-                                        dll_name
+                                        "Possible manual patch hint in {}: {} (best-effort heuristic, may be a false positive)",
+                                        hint.dll_name, hint.possible_method
                                     ),
                                     source: DiagnosticSource::DllParsing,
                                 });
                             }
                         }
-
-                        // Best-effort manual patch detection via string scanning
-                        let manual_result =
-                            panic::catch_unwind(panic::AssertUnwindSafe(|| {
-                                crate::manual::detect_manual_patches(&dll_path)
-                            }));
-
-                        match manual_result {
-                            Ok(hints) => {
-                                for hint in hints {
-                                    diagnostics.push(Diagnostic {
-                                        affected_mod: Some(mod_summary.package_id.clone()),
-                                        severity: Severity::Info,
-                                        message: format!(
-                                            "Possible manual patch hint in {}: {} (best-effort heuristic, may be a false positive)",
-                                            hint.dll_name, hint.possible_method
-                                        ),
-                                        source: DiagnosticSource::DllParsing,
-                                    });
-                                }
-                            }
-                            Err(_) => {
-                                diagnostics.push(Diagnostic {
-                                    affected_mod: Some(mod_summary.package_id.clone()),
-                                    severity: Severity::Warning,
-                                    message: format!(
-                                        "Manual patch detection panicked while scanning {} (caught; results for this DLL may be incomplete)",
-                                        dll_name
-                                    ),
-                                    source: DiagnosticSource::DllParsing,
-                                });
-                            }
+                        Err(_) => {
+                            diagnostics.push(Diagnostic {
+                                affected_mod: Some(mod_summary.package_id.clone()),
+                                severity: Severity::Warning,
+                                message: format!(
+                                    "Manual patch detection panicked while scanning {} (caught; results for this DLL may be incomplete)",
+                                    dll_name
+                                ),
+                                source: DiagnosticSource::DllParsing,
+                            });
                         }
                     }
                 }

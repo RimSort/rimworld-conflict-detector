@@ -1,13 +1,16 @@
 pub mod about_xml;
 pub mod conflict;
+pub mod content_files;
 pub mod detector;
 pub mod diagnostic;
 pub mod folder;
+pub mod load_folders;
 pub mod load_order;
 pub mod mods_config;
 pub mod report;
 pub mod severity;
 pub mod types;
+pub mod xml_io;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod testutil;

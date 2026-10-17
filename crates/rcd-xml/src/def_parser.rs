@@ -1,7 +1,8 @@
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use std::path::Path;
-use walkdir::WalkDir;
+use rcd_core::content_files::collect_files_with_precedence;
+use rcd_core::xml_io::read_xml_file;
+use std::path::{Path, PathBuf};
 
 /// A single parsed def extracted from an XML file.
 #[derive(Debug, Clone)]
@@ -16,33 +17,26 @@ pub struct ParsedDef {
 ///
 /// Returns a tuple of (parsed defs, count of abstract defs without a usable defName that were skipped, count of concrete defs without a defName that were dropped, I/O errors).
 pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, usize, Vec<String>) {
+    parse_defs_dirs(&[dir.to_path_buf()])
+}
+
+/// Parses XML files from directories in high-priority-first order. A file in
+/// the first directory wins for each case-sensitive relative path.
+pub fn parse_defs_dirs(dirs: &[PathBuf]) -> (Vec<ParsedDef>, usize, usize, Vec<String>) {
+    let (files, enumeration_errors) = collect_files_with_precedence(dirs);
     let mut defs = Vec::new();
-    let mut total_skipped: usize = 0;
-    let mut total_unnamed: usize = 0;
-    let mut errors = Vec::new();
+    let mut total_skipped = 0;
+    let mut total_unnamed = 0;
+    let mut errors = enumeration_errors;
 
-    for result in WalkDir::new(dir).into_iter() {
-        let entry = match result {
-            Ok(e) => e,
-            Err(e) => {
-                errors.push(format!("Failed to read directory entry: {}", e));
-                continue;
-            }
-        };
-
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        if !entry
-            .path()
+    for path in files {
+        if !path
             .extension()
             .is_some_and(|ext| ext.eq_ignore_ascii_case("xml"))
         {
             continue;
         }
-
-        let path = entry.path();
-        match std::fs::read_to_string(path) {
+        match read_xml_file(&path) {
             Ok(contents) => {
                 let source = path.to_string_lossy().to_string();
                 let (parsed, skipped, unnamed, xml_errors) =
@@ -52,12 +46,9 @@ pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, usize, Vec<String>)
                 total_unnamed += unnamed;
                 errors.extend(xml_errors);
             }
-            Err(e) => {
-                errors.push(format!("Failed to read {}: {}", path.display(), e));
-            }
+            Err(error) => errors.push(format!("Failed to read {}: {}", path.display(), error)),
         }
     }
-
     (defs, total_skipped, total_unnamed, errors)
 }
 
@@ -137,6 +128,7 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, u
 
                 if inside_defs && tag_name.ends_with("Def") {
                     // Check for Abstract="True" attribute
+                    let attributes = build_attrs_string(e);
                     let is_abstract = e.attributes().filter_map(|a| a.ok()).any(|a| {
                         let key = String::from_utf8_lossy(a.key.as_ref()).to_string();
                         let val = String::from_utf8_lossy(&a.value).to_string();
@@ -147,6 +139,7 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, u
                     match parse_single_def(
                         &mut reader,
                         &tag_name,
+                        &attributes,
                         is_abstract,
                         source,
                         &mut errors,
@@ -193,6 +186,7 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, u
 fn parse_single_def(
     reader: &mut Reader<&[u8]>,
     def_type: &str,
+    root_attributes: &str,
     is_abstract: bool,
     source: &str,
     errors: &mut Vec<String>,
@@ -392,7 +386,7 @@ fn parse_single_def(
     let def_name = def_name?;
 
     // Reconstruct the full raw XML for this def
-    let raw_xml = format!("<{def_type}>{inner_xml}</{def_type}>");
+    let raw_xml = format!("<{def_type}{root_attributes}>{inner_xml}</{def_type}>");
 
     Some(ParsedDef {
         def_type: def_type.to_string(),
@@ -404,16 +398,22 @@ fn parse_single_def(
 
 /// Builds an attribute string from a `BytesStart` element (e.g., ` key="value"`).
 pub(crate) fn build_attrs_string(e: &quick_xml::events::BytesStart<'_>) -> String {
-    let mut attrs = String::new();
-    for attr in e.attributes().filter_map(|a| a.ok()) {
-        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
-        // Raw (still-escaped) source bytes; a literal `"` in them can only
-        // mean the source used single quotes, so escaping it here is always
-        // correct for the double-quoted re-emission.
-        let val = String::from_utf8_lossy(&attr.value).replace('"', "&quot;");
-        attrs.push_str(&format!(r#" {key}="{val}""#));
-    }
-    attrs
+    let mut attributes: Vec<(String, String)> = e
+        .attributes()
+        .filter_map(|attr| attr.ok())
+        .map(|attr| {
+            let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+            // Values are retained in their source-escaped form; only quoting
+            // style is normalized for safe double-quoted reconstruction.
+            let value = String::from_utf8_lossy(&attr.value).replace('"', "&quot;");
+            (key, value)
+        })
+        .collect();
+    attributes.sort_by(|left, right| left.0.cmp(&right.0));
+    attributes
+        .into_iter()
+        .map(|(key, value)| format!(r#" {key}="{value}""#))
+        .collect()
 }
 
 #[cfg(test)]
@@ -915,6 +915,66 @@ mod tests {
                 panic!("reconstruction not well-formed ({}): {msg}", d.def_name);
             }
         }
+    }
+
+    #[test]
+    fn root_attributes_survive_well_formed_reconstruction() {
+        let xml = r#"<Defs><ThingDef Name='root &amp; value' ParentName="base" Abstract="False" Custom="a &quot;b&quot;"><defName>Steel</defName></ThingDef></Defs>"#;
+        let (defs, _, _, errors) = parse_defs_from_xml(xml, "t.xml");
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(defs.len(), 1);
+        for attribute in ["Abstract=", "Custom=", "Name=", "ParentName="] {
+            assert!(defs[0].raw_xml.contains(attribute), "{}", defs[0].raw_xml);
+        }
+        assert!(check_well_formed(&defs[0].raw_xml, "raw").is_none());
+        assert!(defs[0].raw_xml.contains("root &amp; value"));
+    }
+
+    #[test]
+    fn parse_defs_dirs_uses_first_directory_for_duplicate_relative_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let high = temp.path().join("high");
+        let low = temp.path().join("low");
+        for (directory, name) in [(&high, "High"), (&low, "Low")] {
+            std::fs::create_dir_all(directory.join("Defs")).unwrap();
+            std::fs::write(
+                directory.join("Defs/shared.xml"),
+                format!("<Defs><ThingDef><defName>{name}</defName></ThingDef></Defs>"),
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            low.join("Defs/other.xml"),
+            "<Defs><ThingDef><defName>Other</defName></ThingDef></Defs>",
+        )
+        .unwrap();
+        let (defs, skipped, unnamed, errors) = parse_defs_dirs(&[high, low]);
+        assert!(errors.is_empty(), "{errors:?}");
+        assert_eq!(skipped, 0);
+        assert_eq!(unnamed, 0);
+        assert_eq!(
+            defs.iter()
+                .map(|def| def.def_name.as_str())
+                .collect::<Vec<_>>(),
+            ["High", "Other"]
+        );
+    }
+
+    #[test]
+    fn parse_defs_dirs_rejects_xml_files_over_reader_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("oversized.xml");
+        std::fs::File::create(&file)
+            .unwrap()
+            .set_len(rcd_core::xml_io::MAX_XML_FILE_BYTES + 1)
+            .unwrap();
+        let (_, _, _, errors) = parse_defs_dirs(&[temp.path().to_path_buf()]);
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains("50 MiB size limit")),
+            "{errors:?}"
+        );
     }
 
     #[test]

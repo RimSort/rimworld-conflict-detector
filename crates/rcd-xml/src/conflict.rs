@@ -4,13 +4,16 @@
 // 1. XPath overlap: two mods patch the same (or overlapping) XPath target
 // 2. XPath on replaced def: a mod patches a def that another mod fully replaces
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use rayon::prelude::*;
 use rcd_core::{Conflict, DefConflict, DefConflictMechanism, DefTarget, LoadOrder, ModSummary};
 
 use crate::patch_ops::ParsedPatchOp;
 use crate::xpath::{NormalizedXPath, normalize_xpath, xpaths_overlap};
+
+type NonOverlappingDefPairKey = (String, String, String, String);
+type XPathPair = (String, String);
 
 /// Detect XPath-related conflicts across all mods' patch operations.
 ///
@@ -158,12 +161,85 @@ pub fn detect_xpath_conflicts(
                                 .as_ref()
                                 .map(|c| format!("requires mod: {}", c.required_mod)),
                         }));
-                        // Only report once per replacing mod for this patch
-                        break;
                     }
                 }
             }
         }
+    }
+
+    // 3. Aggregate non-overlapping operations on the same concrete def by mod pair.
+    //    Wildcard targets do not identify one concrete def and are intentionally
+    //    excluded; overlap findings remain represented by the conflicts above.
+    let mut concrete_def_buckets: BTreeMap<(String, String), Vec<usize>> = BTreeMap::new();
+    for (index, (_, _, norm)) in normalized.iter().enumerate() {
+        if let (Some(def_type), Some(def_name)) = (&norm.def_type, &norm.def_name) {
+            concrete_def_buckets
+                .entry((def_type.clone(), def_name.clone()))
+                .or_default()
+                .push(index);
+        }
+    }
+
+    let mut non_overlapping_pairs: BTreeMap<NonOverlappingDefPairKey, BTreeSet<XPathPair>> =
+        BTreeMap::new();
+    for ((def_type, def_name), indices) in concrete_def_buckets {
+        for ai in 0..indices.len() {
+            for bi in (ai + 1)..indices.len() {
+                let (mod_a, op_a, norm_a) = &normalized[indices[ai]];
+                let (mod_b, op_b, norm_b) = &normalized[indices[bi]];
+                if mod_a.package_id == mod_b.package_id || xpaths_overlap(norm_a, norm_b) {
+                    continue;
+                }
+
+                let (first_mod, first_xpath, second_mod, second_xpath) =
+                    if mod_a.package_id < mod_b.package_id {
+                        (
+                            &mod_a.package_id,
+                            &op_a.xpath,
+                            &mod_b.package_id,
+                            &op_b.xpath,
+                        )
+                    } else {
+                        (
+                            &mod_b.package_id,
+                            &op_b.xpath,
+                            &mod_a.package_id,
+                            &op_a.xpath,
+                        )
+                    };
+                non_overlapping_pairs
+                    .entry((
+                        def_type.clone(),
+                        def_name.clone(),
+                        first_mod.clone(),
+                        second_mod.clone(),
+                    ))
+                    .or_default()
+                    .insert((first_xpath.clone(), second_xpath.clone()));
+            }
+        }
+    }
+
+    for ((def_type, def_name, first_mod, second_mod), xpath_pairs) in non_overlapping_pairs {
+        let first_summary = all_patches
+            .iter()
+            .find(|(summary, _)| summary.package_id == first_mod)
+            .map(|(summary, _)| summary.clone())
+            .expect("grouped mod must have patch operations");
+        let second_summary = all_patches
+            .iter()
+            .find(|(summary, _)| summary.package_id == second_mod)
+            .map(|(summary, _)| summary.clone())
+            .expect("grouped mod must have patch operations");
+        conflicts.push(Conflict::Def(DefConflict {
+            target: DefTarget { def_type, def_name },
+            mods: vec![first_summary, second_summary],
+            mechanism: DefConflictMechanism::XPathSameDefNonOverlap {
+                xpath_pairs: xpath_pairs.into_iter().collect(),
+            },
+            winner: None,
+            condition: None,
+        }));
     }
 
     conflicts
@@ -265,6 +341,18 @@ mod tests {
         ];
 
         let conflicts = detect_xpath_conflicts(&patches, &HashMap::new(), None);
+        let conflicts: Vec<_> = conflicts
+            .iter()
+            .filter(|conflict| {
+                matches!(
+                    conflict,
+                    Conflict::Def(dc) if matches!(
+                        &dc.mechanism,
+                        DefConflictMechanism::XPathOverlap { .. }
+                    )
+                )
+            })
+            .collect();
         assert_eq!(conflicts.len(), 3);
 
         // Expected order: PawnKindDef bucket first (sorted key order) with
@@ -448,6 +536,223 @@ mod tests {
     }
 
     #[test]
+    fn reports_every_distinct_replacer_for_a_patcher() {
+        let replacers: Vec<_> = ["test.mod.a", "test.mod.b", "test.mod.c"]
+            .into_iter()
+            .map(|id| test_mod_summary_named(id, id))
+            .collect();
+        let patcher = test_mod_summary_named("test.mod.p", "Patcher");
+        let patches = vec![(
+            patcher,
+            vec![ParsedPatchOp {
+                op_type: PatchOpType::Replace,
+                xpath: r#"Defs/ThingDef[defName="Steel"]/statBases"#.into(),
+                source_file: "P.xml".into(),
+                condition: None,
+            }],
+        )];
+        let replacement_defs = HashMap::from([(("ThingDef".into(), "Steel".into()), replacers)]);
+
+        let conflicts = detect_xpath_conflicts(&patches, &replacement_defs, None);
+        let replaced_by: Vec<_> = conflicts
+            .iter()
+            .filter_map(|conflict| match conflict {
+                Conflict::Def(dc) => match &dc.mechanism {
+                    DefConflictMechanism::XPathOnReplacedDef { replaced_by, .. } => {
+                        Some(replaced_by.as_str())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replaced_by.len(), 3);
+        assert_eq!(
+            replaced_by
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["test.mod.a", "test.mod.b", "test.mod.c"]
+                .into_iter()
+                .collect()
+        );
+        assert!(
+            conflicts
+                .iter()
+                .all(|c| c.severity() == rcd_core::Severity::Error)
+        );
+    }
+
+    #[test]
+    fn excludes_patcher_from_replacer_conflicts() {
+        let patcher = test_mod_summary_named("test.mod.p", "Patcher");
+        let patches = vec![(
+            patcher.clone(),
+            vec![ParsedPatchOp {
+                op_type: PatchOpType::Replace,
+                xpath: r#"Defs/ThingDef[defName="Steel"]/statBases"#.into(),
+                source_file: "P.xml".into(),
+                condition: None,
+            }],
+        )];
+        let replacement_defs = HashMap::from([(
+            ("ThingDef".into(), "Steel".into()),
+            vec![
+                patcher,
+                test_mod_summary_named("test.mod.a", "A"),
+                test_mod_summary_named("test.mod.b", "B"),
+            ],
+        )]);
+
+        let conflicts = detect_xpath_conflicts(&patches, &replacement_defs, None);
+        let replaced_by: Vec<_> = conflicts
+            .iter()
+            .filter_map(|conflict| match conflict {
+                Conflict::Def(dc) => match &dc.mechanism {
+                    DefConflictMechanism::XPathOnReplacedDef { replaced_by, .. } => {
+                        Some(replaced_by.as_str())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(replaced_by.len(), 2);
+        assert_eq!(
+            replaced_by
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            ["test.mod.a", "test.mod.b"].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn aggregates_unique_non_overlapping_pairs_for_same_concrete_def() {
+        let mod_a = test_mod_summary_named("test.mod.a", "A");
+        let mod_b = test_mod_summary_named("test.mod.b", "B");
+        let path_a = r#"Defs/ThingDef[defName="Steel"]/statBases/MaxHitPoints"#;
+        let path_b = r#"Defs/ThingDef[defName="Steel"]/costList"#;
+        let path_a2 = r#"Defs/ThingDef[defName="Steel"]/statBases/MarketValue"#;
+        let op = |xpath: &str| ParsedPatchOp {
+            op_type: PatchOpType::Replace,
+            xpath: xpath.into(),
+            source_file: "P.xml".into(),
+            condition: None,
+        };
+        let patches = vec![
+            (mod_a, vec![op(path_a), op(path_a2), op(path_a)]),
+            (mod_b, vec![op(path_b)]),
+        ];
+
+        let conflicts = detect_xpath_conflicts(&patches, &HashMap::new(), None);
+        assert_eq!(conflicts.len(), 1);
+        let Conflict::Def(dc) = &conflicts[0] else {
+            panic!("Expected a def conflict");
+        };
+        assert_eq!(dc.target.def_type, "ThingDef");
+        assert_eq!(dc.target.def_name, "Steel");
+        assert_eq!(
+            dc.mods
+                .iter()
+                .map(|m| m.package_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["test.mod.a", "test.mod.b"]
+        );
+        assert_eq!(conflicts[0].severity(), rcd_core::Severity::Info);
+        assert!(matches!(
+            &dc.mechanism,
+            DefConflictMechanism::XPathSameDefNonOverlap { xpath_pairs }
+                if xpath_pairs == &vec![
+                    (path_a2.to_string(), path_b.to_string()),
+                    (path_a.to_string(), path_b.to_string()),
+                ]
+        ));
+    }
+
+    #[test]
+    fn non_overlap_info_excludes_wildcard_different_defs_and_overlapping_pairs() {
+        let mod_a = test_mod_summary_named("test.mod.a", "A");
+        let mod_b = test_mod_summary_named("test.mod.b", "B");
+        let op = |xpath: &str| ParsedPatchOp {
+            op_type: PatchOpType::Replace,
+            xpath: xpath.into(),
+            source_file: "P.xml".into(),
+            condition: None,
+        };
+        let patches = vec![
+            (
+                mod_a,
+                vec![
+                    op(r#"Defs/ThingDef[defName="Steel"]/statBases"#),
+                    op(r#"Defs/ThingDef[defName="Steel"]/costList"#),
+                ],
+            ),
+            (
+                mod_b,
+                vec![
+                    op(r#"Defs/ThingDef[defName="Steel"]/statBases"#),
+                    op(r#"Defs/ThingDef[defName="Steel"]/graphicData"#),
+                    op(r#"Defs/PawnKindDef[defName="Steel"]/costList"#),
+                    op(r#"Defs/ThingDef[defName="Bronze"]/costList"#),
+                    op("Defs/ThingDef/costList"),
+                ],
+            ),
+        ];
+
+        let conflicts = detect_xpath_conflicts(&patches, &HashMap::new(), None);
+        let aggregate_pairs: Vec<_> = conflicts
+            .iter()
+            .filter_map(|conflict| match conflict {
+                Conflict::Def(dc)
+                    if matches!(
+                        &dc.mechanism,
+                        DefConflictMechanism::XPathSameDefNonOverlap { .. }
+                    ) =>
+                {
+                    Some((
+                        dc.mods[0].package_id.as_str(),
+                        dc.mods[1].package_id.as_str(),
+                        &dc.mechanism,
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            aggregate_pairs
+                .iter()
+                .any(|(a, b, _)| (*a, *b) == ("test.mod.a", "test.mod.b"))
+        );
+        assert_eq!(aggregate_pairs.len(), 1);
+
+        let ab_pairs = aggregate_pairs
+            .iter()
+            .find(|(a, b, _)| (*a, *b) == ("test.mod.a", "test.mod.b"))
+            .unwrap();
+        let DefConflictMechanism::XPathSameDefNonOverlap { xpath_pairs } = ab_pairs.2 else {
+            unreachable!();
+        };
+        assert_eq!(
+            xpath_pairs,
+            &vec![
+                (
+                    r#"Defs/ThingDef[defName="Steel"]/costList"#.into(),
+                    r#"Defs/ThingDef[defName="Steel"]/graphicData"#.into()
+                ),
+                (
+                    r#"Defs/ThingDef[defName="Steel"]/costList"#.into(),
+                    r#"Defs/ThingDef[defName="Steel"]/statBases"#.into()
+                ),
+                (
+                    r#"Defs/ThingDef[defName="Steel"]/statBases"#.into(),
+                    r#"Defs/ThingDef[defName="Steel"]/graphicData"#.into()
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn no_conflict_within_same_mod() {
         let mod_c = test_mod_summary_named("test.mod.c", "Mod C");
 
@@ -508,11 +813,15 @@ mod tests {
         let replacement_defs = HashMap::new();
         let conflicts = detect_xpath_conflicts(&patches, &replacement_defs, None);
 
-        assert_eq!(
-            conflicts.len(),
-            0,
-            "Non-overlapping xpaths should not conflict"
-        );
+        assert_eq!(conflicts.len(), 1);
+        let Conflict::Def(dc) = &conflicts[0] else {
+            panic!("Expected a def conflict");
+        };
+        assert!(matches!(
+            &dc.mechanism,
+            DefConflictMechanism::XPathSameDefNonOverlap { .. }
+        ));
+        assert_eq!(conflicts[0].severity(), rcd_core::Severity::Info);
     }
 
     #[test]
