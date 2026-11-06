@@ -87,19 +87,12 @@ mod tests {
 
         let (found, errors) = discover_assemblies_dirs(&[high.clone(), low.clone()]);
         assert!(errors.is_empty(), "unexpected discovery errors: {errors:?}");
-        let relative: Vec<_> = found
-            .iter()
-            .map(|path| {
-                path.strip_prefix(&high)
-                    .map(|relative| format!("high/{}", relative.display()))
-                    .unwrap_or_else(|_| {
-                        format!("low/{}", path.strip_prefix(&low).unwrap().display())
-                    })
-            })
-            .collect();
         assert_eq!(
-            relative,
-            vec!["high/nested/Duplicate.dll", "low/nested/Unique.dll"]
+            found,
+            vec![
+                high.join("nested/Duplicate.dll"),
+                low.join("nested/Unique.dll")
+            ]
         );
     }
 
