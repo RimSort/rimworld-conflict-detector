@@ -65,17 +65,20 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let high = root.path().join("high");
         let low = root.path().join("low");
+        let case_variant = root.path().join("case_variant");
+        // Separate roots preserve both spellings even on case-insensitive filesystems.
         for (base, rel, value) in [
             (&high, "Defs/nested/a.xml", "high"),
             (&high, "Defs/A.xml", "upper"),
             (&low, "Defs/nested/a.xml", "low"),
-            (&low, "Defs/nested/A.xml", "distinct"),
+            (&case_variant, "Defs/nested/A.xml", "distinct"),
         ] {
             let file = base.join(rel);
             std::fs::create_dir_all(file.parent().unwrap()).unwrap();
             std::fs::write(file, value).unwrap();
         }
-        let (files, warnings) = collect_files_with_precedence(&[high.clone(), low.clone()]);
+        let (files, warnings) =
+            collect_files_with_precedence(&[high.clone(), low, case_variant.clone()]);
         assert!(warnings.is_empty());
         let rels = files
             .iter()
@@ -83,14 +86,23 @@ mod tests {
                 file.strip_prefix(&high)
                     .map(|p| p.to_string_lossy().into_owned())
                     .unwrap_or_else(|_| {
-                        format!("low/{}", file.strip_prefix(&low).unwrap().display())
+                        format!(
+                            "case_variant/{}",
+                            file.strip_prefix(&case_variant).unwrap().display()
+                        )
                     })
+                    .replace('\\', "/")
             })
             .collect::<Vec<_>>();
         assert_eq!(
             rels,
-            ["Defs/A.xml", "Defs/nested/a.xml", "low/Defs/nested/A.xml"]
+            [
+                "Defs/A.xml",
+                "Defs/nested/a.xml",
+                "case_variant/Defs/nested/A.xml"
+            ]
         );
         assert_eq!(std::fs::read_to_string(&files[1]).unwrap(), "high");
+        assert_eq!(std::fs::read_to_string(&files[2]).unwrap(), "distinct");
     }
 }
