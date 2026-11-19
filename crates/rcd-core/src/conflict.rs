@@ -84,11 +84,36 @@ pub struct HarmonyConflict {
     pub execution_order: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Conflict {
     Def(DefConflict),
     Harmony(HarmonyConflict),
+}
+
+impl Serialize for Conflict {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        #[serde(tag = "type", rename_all = "snake_case")]
+        enum Repr<'a> {
+            Def {
+                #[serde(flatten)]
+                payload: &'a DefConflict,
+                severity: Severity,
+            },
+            Harmony {
+                #[serde(flatten)]
+                payload: &'a HarmonyConflict,
+                severity: Severity,
+            },
+        }
+        let severity = self.severity();
+        match self {
+            Self::Def(payload) => Repr::Def { payload, severity },
+            Self::Harmony(payload) => Repr::Harmony { payload, severity },
+        }
+        .serialize(serializer)
+    }
 }
 
 impl Conflict {
@@ -146,6 +171,27 @@ mod tests {
     use crate::testutil::test_mod_summary;
 
     #[test]
+    fn serialized_conflict_includes_derived_severity() {
+        let conflict = Conflict::Def(DefConflict {
+            target: DefTarget {
+                def_type: "ThingDef".into(),
+                def_name: "Steel".into(),
+            },
+            mods: vec![],
+            mechanism: DefConflictMechanism::DirectReplacement {
+                divergent_fields: vec![],
+            },
+            winner: None,
+            condition: None,
+        });
+        let value = serde_json::to_value(&conflict).unwrap();
+        assert_eq!(value["type"], "def");
+        assert_eq!(value["severity"], "error");
+        let decoded: Conflict = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.severity(), Severity::Error);
+    }
+
+    #[test]
     fn def_replacement_is_error() {
         let c = Conflict::Def(DefConflict {
             target: DefTarget {
@@ -160,6 +206,10 @@ mod tests {
             condition: None,
         });
         assert_eq!(c.severity(), Severity::Error);
+        assert_eq!(
+            serde_json::to_value(&c).unwrap()["severity"],
+            serde_json::to_value(c.severity()).unwrap()
+        );
     }
 
     #[test]
@@ -179,6 +229,10 @@ mod tests {
             condition: None,
         });
         assert_eq!(c.severity(), Severity::Warning);
+        assert_eq!(
+            serde_json::to_value(&c).unwrap()["severity"],
+            serde_json::to_value(c.severity()).unwrap()
+        );
     }
 
     #[test]
@@ -198,6 +252,10 @@ mod tests {
             condition: None,
         });
         assert_eq!(c.severity(), Severity::Info);
+        assert_eq!(
+            serde_json::to_value(&c).unwrap()["severity"],
+            serde_json::to_value(c.severity()).unwrap()
+        );
     }
 
     #[test]
@@ -216,6 +274,10 @@ mod tests {
             condition: None,
         });
         assert_eq!(c.severity(), Severity::Error);
+        assert_eq!(
+            serde_json::to_value(&c).unwrap()["severity"],
+            serde_json::to_value(c.severity()).unwrap()
+        );
     }
 
     #[test]
@@ -233,6 +295,10 @@ mod tests {
             condition: None,
         });
         assert_eq!(c.severity(), Severity::Info);
+        assert_eq!(
+            serde_json::to_value(&c).unwrap()["severity"],
+            serde_json::to_value(c.severity()).unwrap()
+        );
     }
 
     #[test]
@@ -267,6 +333,10 @@ mod tests {
             execution_order: None,
         });
         assert_eq!(c.severity(), Severity::Error);
+        assert_eq!(
+            serde_json::to_value(&c).unwrap()["severity"],
+            serde_json::to_value(c.severity()).unwrap()
+        );
     }
 
     #[test]
@@ -301,6 +371,10 @@ mod tests {
             execution_order: None,
         });
         assert_eq!(c.severity(), Severity::Info);
+        assert_eq!(
+            serde_json::to_value(&c).unwrap()["severity"],
+            serde_json::to_value(c.severity()).unwrap()
+        );
     }
 
     #[test]
@@ -335,6 +409,10 @@ mod tests {
             execution_order: None,
         });
         assert_eq!(c.severity(), Severity::Warning);
+        assert_eq!(
+            serde_json::to_value(&c).unwrap()["severity"],
+            serde_json::to_value(c.severity()).unwrap()
+        );
     }
 
     #[test]
@@ -369,6 +447,10 @@ mod tests {
             execution_order: None,
         });
         assert_eq!(c.severity(), Severity::Warning);
+        assert_eq!(
+            serde_json::to_value(&c).unwrap()["severity"],
+            serde_json::to_value(c.severity()).unwrap()
+        );
     }
 
     #[test]

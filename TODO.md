@@ -36,7 +36,7 @@
 
 - [ ] **Investigate XML leaf-text edge cases** — Empty values, comments, and CDATA are handled by the leaf parsers, but source inspection suggests that trimming text events before concatenation may remove whitespace around comments or CDATA. A nested element with the same name as its enclosing leaf may also cause `read_element_text` to return early. Add focused reproductions before determining impact or fixes; these cases have not been verified.
 
-- [ ] **Unbounded managed DLL reads** — XML files are limited to 50 MiB, but Harmony attribute and manual patch scanning still read DLLs without a size limit. Consider bounded reads and diagnostics.
+- [ ] **Unbounded input and report memory** — XML and managed DLL reads and generated reports are intentionally uncapped; large inputs or many findings can exhaust memory. Consider a future streaming design without imposing size caps.
 
 - [x] **Patch-operation recursion limit** — Operations nested beyond 64 levels are diagnosed and skipped iteratively so later siblings can still be analyzed. This limits patch-operation nesting, not general XML depth.
 

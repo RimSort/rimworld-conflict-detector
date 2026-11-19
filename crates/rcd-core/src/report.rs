@@ -13,15 +13,15 @@ pub struct ReportMetadata {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeverityCounts {
-    pub error: u32,
-    pub warning: u32,
-    pub info: u32,
+    pub error: usize,
+    pub warning: usize,
+    pub info: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReportSummary {
-    pub total_mods: u32,
-    pub mods_with_conflicts: u32,
+    pub total_mods: usize,
+    pub mods_with_conflicts: usize,
     pub conflicts_by_severity: SeverityCounts,
 }
 
@@ -40,9 +40,9 @@ impl Report {
         conflicts: Vec<Conflict>,
         diagnostics: Vec<Diagnostic>,
     ) -> Self {
-        let mut error_count = 0u32;
-        let mut warning_count = 0u32;
-        let mut info_count = 0u32;
+        let mut error_count = 0usize;
+        let mut warning_count = 0usize;
+        let mut info_count = 0usize;
         let mut mods_with_conflicts: HashSet<String> = HashSet::new();
 
         for conflict in &conflicts {
@@ -56,14 +56,14 @@ impl Report {
             }
         }
 
-        let total_mods = metadata.mods_scanned.len() as u32;
+        let total_mods = metadata.mods_scanned.len();
 
         Report {
-            schema_version: 2,
+            schema_version: 3,
             metadata,
             summary: ReportSummary {
                 total_mods,
-                mods_with_conflicts: mods_with_conflicts.len() as u32,
+                mods_with_conflicts: mods_with_conflicts.len(),
                 conflicts_by_severity: SeverityCounts {
                     error: error_count,
                     warning: warning_count,
@@ -111,6 +111,24 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn severity_counts_serialize_above_u32_max() {
+        let count = u32::MAX as usize + 1;
+        let counts = SeverityCounts {
+            error: count,
+            warning: 0,
+            info: 0,
+        };
+        let _: usize = counts.error;
+        let _: usize = counts.warning;
+        let _: usize = counts.info;
+        assert_eq!(
+            serde_json::to_value(counts).unwrap()["error"],
+            4_294_967_296u64
+        );
+    }
+
+    #[test]
     fn report_counts_severities() {
         let conflicts = vec![
             Conflict::Def(DefConflict {
@@ -142,6 +160,8 @@ mod tests {
         ];
 
         let report = Report::build(test_metadata(), conflicts, vec![]);
+        let _: usize = report.summary.total_mods;
+        let _: usize = report.summary.mods_with_conflicts;
         assert_eq!(report.summary.conflicts_by_severity.error, 1);
         assert_eq!(report.summary.conflicts_by_severity.warning, 1);
         assert!(report.has_errors());
@@ -154,6 +174,9 @@ mod tests {
             severity: sev,
             message: "m".into(),
             source: crate::DiagnosticSource::MetadataResolution,
+            analysis_incomplete: false,
+            code: None,
+            params: Default::default(),
         };
         let meta = || ReportMetadata {
             timestamp: "t".into(),
@@ -197,7 +220,7 @@ mod tests {
         let report = Report::build(test_metadata(), vec![], vec![]);
         let json = serde_json::to_string_pretty(&report).unwrap();
         let parsed: Report = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.schema_version, 2);
+        assert_eq!(parsed.schema_version, 3);
     }
 
     #[test]
@@ -220,7 +243,9 @@ mod tests {
         let report = Report::build(test_metadata(), vec![conflict], vec![]);
         let json = serde_json::to_value(&report).unwrap();
 
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
+        let roundtrip: Report = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(roundtrip.conflicts.len(), 1);
         let existing_xpath_overlap = serde_json::to_value(DefConflictMechanism::XPathOverlap {
             xpath_a: "a".into(),
             xpath_b: "b".into(),

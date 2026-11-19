@@ -1,7 +1,10 @@
 use rcd_core::folder::discover_mods;
 use rcd_core::report::ReportMetadata;
-use rcd_core::testutil::fixtures_path;
 use rcd_core::*;
+
+fn fixtures_path() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/mods")
+}
 
 fn run_analysis(mods: &[Mod], order: Option<&LoadOrder>) -> Report {
     let mut engine = Engine::new();
@@ -36,7 +39,7 @@ fn detect_direct_replacement_conflict() {
 fn report_has_correct_schema_version() {
     let (mods, _diagnostics) = discover_mods(&[fixtures_path()], Some("1.5"));
     let report = run_analysis(&mods, None);
-    assert_eq!(report.schema_version, 2);
+    assert_eq!(report.schema_version, 3);
 }
 
 #[test]
@@ -74,6 +77,6 @@ fn summary_counts_match_conflicts() {
         .conflicts
         .iter()
         .filter(|c| c.severity() == Severity::Error)
-        .count() as u32;
+        .count();
     assert_eq!(report.summary.conflicts_by_severity.error, actual_errors);
 }

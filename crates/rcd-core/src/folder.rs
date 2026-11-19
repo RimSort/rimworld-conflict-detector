@@ -33,6 +33,9 @@ pub fn resolve_mod_folders_with_active(
                                 "Failed to parse LoadFolders.xml; using implicit folder resolution: {error}"
                             ),
                             source: crate::DiagnosticSource::FolderResolution,
+                            analysis_incomplete: true,
+                            code: Some("load_folders_parse_failure".into()),
+                            params: [("path".into(), path.display().to_string()), ("detail".into(), error.to_string())].into_iter().collect(),
                         }),
                     },
                 };
@@ -51,13 +54,16 @@ pub fn resolve_mod_folders_with_active(
                             folders.unknown_conditions.join(", ")
                         ),
                         source: crate::DiagnosticSource::FolderResolution,
+                        analysis_incomplete: true,
+                        code: Some("load_folders_unknown_conditions".into()),
+                        params: [("conditions".into(), folders.unknown_conditions.join(", "))].into_iter().collect(),
                     });
                 }
                 if let Some(entries) = selection.entries {
                     clear_paths(m);
                     for entry in entries.iter().rev() {
                         if let Some(relative) = entry.relative_path() {
-                            add_content_dirs(m, &relative);
+                            add_content_dirs(m, &relative, &mut diagnostics);
                         }
                     }
                     return diagnostics;
@@ -72,10 +78,13 @@ pub fn resolve_mod_folders_with_active(
                     m.root_path.display()
                 ),
                 source: crate::DiagnosticSource::FolderResolution,
+                analysis_incomplete: true,
+                code: Some("load_folders_inspection_failure".into()),
+                params: [("path".into(), m.root_path.display().to_string()), ("detail".into(), error.to_string())].into_iter().collect(),
             }),
         }
     }
-    resolve_implicit_folders(m, game_version);
+    resolve_implicit_folders(m, game_version, &mut diagnostics);
     diagnostics
 }
 
@@ -88,35 +97,121 @@ fn clear_paths(m: &mut Mod) {
 fn find_load_folders(root: &Path) -> std::io::Result<Option<PathBuf>> {
     let mut entries = std::fs::read_dir(root)?.collect::<Result<Vec<_>, _>>()?;
     entries.sort_by_key(|entry| entry.file_name());
-    let mut found = None;
-    for entry in entries {
-        let file_type = entry.file_type()?;
-        if file_type.is_file()
-            && entry
+    let candidates = entries
+        .into_iter()
+        .filter(|entry| {
+            entry
                 .file_name()
                 .to_string_lossy()
                 .eq_ignore_ascii_case("LoadFolders.xml")
-        {
-            found.get_or_insert_with(|| entry.path());
+        })
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [path] => {
+            let metadata = std::fs::metadata(path).map_err(|error| {
+                std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+            })?;
+            if !metadata.is_file() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{}: not a regular file", path.display()),
+                ));
+            }
+            Ok(Some(path.clone()))
         }
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "multiple LoadFolders.xml candidates: {}",
+                candidates
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        )),
     }
-    Ok(found)
 }
 
-fn add_content_dirs(m: &mut Mod, relative: &Path) {
+fn inspect_content_dir(
+    path: PathBuf,
+    paths: &mut Vec<PathBuf>,
+    mod_id: &str,
+    diagnostics: &mut Vec<crate::Diagnostic>,
+) {
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => std::fs::metadata(&path),
+        Ok(metadata) => Ok(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            match inspect_missing_parent(&path) {
+                Ok(()) => return,
+                Err(error) => Err(error),
+            }
+        }
+        Err(error) => Err(error),
+    };
+    match metadata {
+        Ok(metadata) if metadata.is_dir() => paths.push(path),
+        other => {
+            let (detail, code) = match other {
+                Ok(_) => ("not a directory".to_owned(), "content_path_not_directory"),
+                Err(error) => (error.to_string(), "content_directory_inspection_failure"),
+            };
+            diagnostics.push(crate::Diagnostic {
+                affected_mod: Some(mod_id.to_owned()),
+                severity: crate::Severity::Warning,
+                message: format!(
+                    "Failed to inspect content directory {}: {detail}",
+                    path.display()
+                ),
+                source: crate::DiagnosticSource::FolderResolution,
+                analysis_incomplete: true,
+                code: Some(code.into()),
+                params: [
+                    ("path".into(), path.display().to_string()),
+                    ("detail".into(), detail),
+                ]
+                .into_iter()
+                .collect(),
+            });
+        }
+    }
+}
+
+fn inspect_missing_parent(path: &Path) -> std::io::Result<()> {
+    for parent in path.ancestors().skip(1) {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    std::fs::metadata(parent)?;
+                }
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn add_content_dirs(m: &mut Mod, relative: &Path, diagnostics: &mut Vec<crate::Diagnostic>) {
     for (folder, paths) in [
         ("Defs", &mut m.defs_paths),
         ("Patches", &mut m.patches_paths),
         ("Assemblies", &mut m.assemblies_paths),
     ] {
         let full = m.root_path.join(relative).join(folder);
-        if full.is_dir() {
-            paths.push(full);
-        }
+        inspect_content_dir(full, paths, &m.package_id, diagnostics);
     }
 }
 
-fn resolve_implicit_folders(m: &mut Mod, game_version: Option<&str>) {
+fn resolve_implicit_folders(
+    m: &mut Mod,
+    game_version: Option<&str>,
+    diagnostics: &mut Vec<crate::Diagnostic>,
+) {
     clear_paths(m);
     let version = game_version
         .and_then(normalize_game_version)
@@ -127,19 +222,20 @@ fn resolve_implicit_folders(m: &mut Mod, game_version: Option<&str>) {
         ("Assemblies", &mut m.assemblies_paths),
     ] {
         if let Some(version) = &version {
-            let path = m.root_path.join(version).join(folder);
-            if path.is_dir() {
-                paths.push(path);
-            }
+            inspect_content_dir(
+                m.root_path.join(version).join(folder),
+                paths,
+                &m.package_id,
+                diagnostics,
+            );
         }
-        let common = m.root_path.join("Common").join(folder);
-        if common.is_dir() {
-            paths.push(common);
-        }
-        let root = m.root_path.join(folder);
-        if root.is_dir() {
-            paths.push(root);
-        }
+        inspect_content_dir(
+            m.root_path.join("Common").join(folder),
+            paths,
+            &m.package_id,
+            diagnostics,
+        );
+        inspect_content_dir(m.root_path.join(folder), paths, &m.package_id, diagnostics);
     }
 }
 
@@ -201,11 +297,7 @@ fn discover_mod_metadata(search_dirs: &[PathBuf]) -> (Vec<Mod>, Vec<crate::Diagn
         let entries = match std::fs::read_dir(search_dir) {
             Ok(entries) => entries,
             Err(e) => {
-                diagnostics.push(discovery_warning(format!(
-                    "Failed to read directory {}: {}",
-                    search_dir.display(),
-                    e
-                )));
+                diagnostics.push(discovery_warning(search_dir, &e, false));
                 continue;
             }
         };
@@ -213,11 +305,7 @@ fn discover_mod_metadata(search_dirs: &[PathBuf]) -> (Vec<Mod>, Vec<crate::Diagn
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
-                    diagnostics.push(discovery_warning(format!(
-                        "Failed to read directory entry in {}: {}",
-                        search_dir.display(),
-                        e
-                    )));
+                    diagnostics.push(discovery_warning(search_dir, &e, true));
                     continue;
                 }
             };
@@ -239,12 +327,39 @@ fn discover_mod_metadata(search_dirs: &[PathBuf]) -> (Vec<Mod>, Vec<crate::Diagn
     (mods, diagnostics)
 }
 
-fn discovery_warning(message: String) -> crate::Diagnostic {
+fn discovery_warning(
+    path: &Path,
+    error: &impl std::fmt::Display,
+    entry: bool,
+) -> crate::Diagnostic {
+    let (message, code) = if entry {
+        (
+            format!(
+                "Failed to read directory entry in {}: {}",
+                path.display(),
+                error
+            ),
+            "mod_directory_entry_read_failure",
+        )
+    } else {
+        (
+            format!("Failed to read directory {}: {}", path.display(), error),
+            "mod_directory_read_failure",
+        )
+    };
     crate::Diagnostic {
         affected_mod: None,
         severity: crate::Severity::Warning,
         message,
         source: crate::DiagnosticSource::FolderResolution,
+        analysis_incomplete: true,
+        code: Some(code.into()),
+        params: [
+            ("path".into(), path.display().to_string()),
+            ("detail".into(), error.to_string()),
+        ]
+        .into_iter()
+        .collect(),
     }
 }
 
@@ -252,6 +367,19 @@ fn discovery_warning(message: String) -> crate::Diagnostic {
 mod tests {
     use super::*;
     use crate::testutil::fixtures_path;
+
+    #[test]
+    fn discovery_warning_preserves_path_and_detail() {
+        let path = Path::new("/mods");
+        let diagnostic = discovery_warning(path, &"bad", false);
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("mod_directory_read_failure")
+        );
+        assert_eq!(diagnostic.params["path"], "/mods");
+        assert_eq!(diagnostic.params["detail"], "bad");
+        assert_eq!(diagnostic.message, "Failed to read directory /mods: bad");
+    }
 
     #[test]
     fn resolve_version_common_and_root_together_in_precedence_order() {
@@ -299,6 +427,80 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn unique_loadfolders_file_link_selects_custom_content() {
+        use std::os::unix::fs::symlink;
+        let xml = "<loadFolders><v1.7><li>Custom</li></v1.7></loadFolders>";
+        for linked in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let path = write_mod(root.path(), "mod", "example.mod", "Example", None);
+            std::fs::create_dir_all(path.join("Custom/Defs")).unwrap();
+            if linked {
+                std::fs::write(path.join("folders.xml"), xml).unwrap();
+                symlink("folders.xml", path.join("LoadFolders.xml")).unwrap();
+            } else {
+                std::fs::write(path.join("LoadFolders.xml"), xml).unwrap();
+            }
+            let mut m = parse_about_xml(&path).unwrap();
+            let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.7"), &[]);
+            assert!(diagnostics.is_empty());
+            assert_eq!(m.defs_paths, [path.join("Custom/Defs")]);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn unusable_loadfolders_selector_is_incomplete() {
+        use std::os::unix::fs::symlink;
+        for kind in ["dangling", "loop", "directory"] {
+            let root = tempfile::tempdir().unwrap();
+            let path = write_mod(root.path(), "mod", "example.mod", "Example", None);
+            std::fs::create_dir_all(path.join("Defs")).unwrap();
+            let selector = path.join("LoadFolders.xml");
+            match kind {
+                "dangling" => symlink("missing.xml", &selector).unwrap(),
+                "loop" => symlink("LoadFolders.xml", &selector).unwrap(),
+                _ => std::fs::create_dir(&selector).unwrap(),
+            }
+            let mut m = parse_about_xml(&path).unwrap();
+            let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.7"), &[]);
+            let issue = diagnostics
+                .iter()
+                .find(|d| d.code.as_deref() == Some("load_folders_inspection_failure"))
+                .unwrap();
+            assert!(issue.analysis_incomplete);
+            assert_eq!(issue.severity, crate::Severity::Warning);
+            assert!(issue.params["detail"].contains(&selector.display().to_string()));
+            assert_eq!(m.defs_paths, [path.join("Defs")]);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn ambiguous_loadfolders_selectors_are_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        let path = write_mod(root.path(), "mod", "example.mod", "Example", None);
+        std::fs::create_dir_all(path.join("Defs")).unwrap();
+        let a = path.join("LoadFolders.xml");
+        let b = path.join("loadfolders.xml");
+        std::fs::write(&a, "<loadFolders/>").unwrap();
+        if b.exists() {
+            return; // This filesystem cannot represent competing case variants.
+        }
+        std::fs::write(&b, "<loadFolders/>").unwrap();
+        let mut m = parse_about_xml(&path).unwrap();
+        let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.7"), &[]);
+        let issue = diagnostics
+            .iter()
+            .find(|d| d.code.as_deref() == Some("load_folders_inspection_failure"))
+            .unwrap();
+        assert!(issue.analysis_incomplete);
+        assert!(issue.params["detail"].contains(&a.display().to_string()));
+        assert!(issue.params["detail"].contains(&b.display().to_string()));
+        assert_eq!(m.defs_paths, [path.join("Defs")]);
+    }
+
+    #[test]
     fn explicit_entries_reverse_precedence_and_ignore_missing_directories() {
         let root = tempfile::tempdir().unwrap();
         let xml =
@@ -333,6 +535,7 @@ mod tests {
             let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
             assert_eq!(diagnostics.len(), 1);
             assert_eq!(diagnostics[0].affected_mod.as_deref(), Some("example.mod"));
+            assert_eq!(diagnostics[0].analysis_incomplete, !expected_empty);
             assert_eq!(m.defs_paths.is_empty(), expected_empty);
         }
     }
@@ -347,14 +550,23 @@ mod tests {
         std::fs::write(&mod_path, "not a directory").unwrap();
 
         let diagnostics = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
-        assert_eq!(diagnostics.len(), 1);
+        let loadfolders = diagnostics
+            .iter()
+            .find(|d| d.message.contains("LoadFolders"))
+            .unwrap();
         assert_eq!(
-            diagnostics[0].source,
+            loadfolders.source,
             crate::DiagnosticSource::FolderResolution
         );
-        assert_eq!(diagnostics[0].severity, crate::Severity::Warning);
-        assert_eq!(diagnostics[0].affected_mod.as_deref(), Some("example.mod"));
-        assert!(diagnostics[0].message.contains("LoadFolders"));
+        assert_eq!(
+            loadfolders.code.as_deref(),
+            Some("load_folders_inspection_failure")
+        );
+        assert_eq!(loadfolders.params["path"], mod_path.display().to_string());
+        assert!(!loadfolders.params["detail"].is_empty());
+        assert_eq!(loadfolders.severity, crate::Severity::Warning);
+        assert_eq!(loadfolders.affected_mod.as_deref(), Some("example.mod"));
+        assert!(diagnostics.iter().all(|d| d.analysis_incomplete));
         assert!(m.defs_paths.is_empty());
     }
 
@@ -440,6 +652,128 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].severity, crate::Severity::Info);
         assert_eq!(diagnostics[0].affected_mod.as_deref(), Some("example.mod"));
+    }
+
+    #[test]
+    fn optional_absence_is_normal_but_non_directory_is_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", None);
+        let mut m = parse_about_xml(&mod_path).unwrap();
+        assert!(resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]).is_empty());
+        std::fs::write(mod_path.join("Defs"), "not a directory").unwrap();
+        let diags = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        let diagnostic = diags.iter().find(|d| d.message.contains("Defs")).unwrap();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("content_path_not_directory")
+        );
+        assert_eq!(
+            diagnostic.params["path"],
+            mod_path.join("Defs").display().to_string()
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.analysis_incomplete && d.message.contains("Defs"))
+        );
+    }
+
+    #[test]
+    fn selected_invalid_content_directory_keeps_valid_sibling() {
+        let root = tempfile::tempdir().unwrap();
+        let xml = "<loadFolders><v1.5><li>Bad</li><li>Good</li></v1.5></loadFolders>";
+        let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", Some(xml));
+        std::fs::create_dir_all(mod_path.join("Bad")).unwrap();
+        std::fs::write(mod_path.join("Bad/Defs"), "not a directory").unwrap();
+        std::fs::create_dir_all(mod_path.join("Good/Defs")).unwrap();
+        let mut m = parse_about_xml(&mod_path).unwrap();
+        let diags = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        assert_eq!(m.defs_paths, [mod_path.join("Good/Defs")]);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.analysis_incomplete && d.message.contains("Bad/Defs"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_intermediate_selected_path_is_incomplete_and_keeps_valid_sibling() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let xml = "<loadFolders><v1.5><li>Custom/Deep</li><li>Good</li></v1.5></loadFolders>";
+        let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", Some(xml));
+        symlink("missing", mod_path.join("Custom")).unwrap();
+        std::fs::create_dir_all(mod_path.join("Good/Defs")).unwrap();
+        let mut m = parse_about_xml(&mod_path).unwrap();
+        let diags = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        assert_eq!(m.defs_paths, [mod_path.join("Good/Defs")]);
+        for folder in ["Defs", "Patches", "Assemblies"] {
+            let expected = mod_path.join("Custom/Deep").join(folder);
+            assert!(
+                diags.iter().any(|d| d.analysis_incomplete
+                    && d.source == crate::DiagnosticSource::FolderResolution
+                    && d.message.contains(&expected.to_string_lossy().to_string())),
+                "{diags:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_intermediate_implicit_paths_are_incomplete_and_keep_valid_sibling() {
+        use std::os::unix::fs::symlink;
+        for broken in ["Common", "1.5"] {
+            let root = tempfile::tempdir().unwrap();
+            let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", None);
+            symlink("missing", mod_path.join(broken)).unwrap();
+            std::fs::create_dir_all(mod_path.join("Defs")).unwrap();
+            let mut m = parse_about_xml(&mod_path).unwrap();
+            let diags = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+            assert_eq!(m.defs_paths, [mod_path.join("Defs")]);
+            for folder in ["Defs", "Patches", "Assemblies"] {
+                let expected = mod_path.join(broken).join(folder);
+                assert!(
+                    diags.iter().any(|d| d.analysis_incomplete
+                        && d.source == crate::DiagnosticSource::FolderResolution
+                        && d.message.contains(&expected.to_string_lossy().to_string())),
+                    "{broken}: {diags:?}"
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn valid_intermediate_symlink_preserves_optional_absence_and_scans_defs() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let xml = "<loadFolders><v1.5><li>Linked</li></v1.5></loadFolders>";
+        let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", Some(xml));
+        std::fs::create_dir_all(mod_path.join("Target/Defs")).unwrap();
+        symlink("Target", mod_path.join("Linked")).unwrap();
+        let mut m = parse_about_xml(&mod_path).unwrap();
+        let diags = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        assert!(diags.is_empty(), "{diags:?}");
+        assert_eq!(m.defs_paths, [mod_path.join("Linked/Defs")]);
+        assert!(m.patches_paths.is_empty());
+        assert!(m.assemblies_paths.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn top_level_symlink_loop_is_incomplete() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", None);
+        symlink("Defs", mod_path.join("Defs")).unwrap();
+        let mut m = parse_about_xml(&mod_path).unwrap();
+        let diags = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.analysis_incomplete && d.message.contains("Defs"))
+        );
     }
 
     #[test]

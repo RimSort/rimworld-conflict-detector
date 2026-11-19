@@ -11,7 +11,60 @@ use rayon::prelude::*;
 use rcd_core::{
     Conflict, Detector, Diagnostic, DiagnosticSource, LoadOrder, Mod, ModSummary, Severity,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+struct XmlIssue {
+    message: String,
+    code: Option<String>,
+    params: BTreeMap<String, String>,
+}
+
+impl XmlIssue {
+    fn new(message: String, code: &str, params: &[(&str, String)]) -> Self {
+        Self {
+            message,
+            code: Some(code.into()),
+            params: params
+                .iter()
+                .map(|(key, value)| ((*key).into(), value.clone()))
+                .collect(),
+        }
+    }
+
+    fn parse_error(source: &str, detail: impl std::fmt::Display) -> Self {
+        Self::new(
+            format!("XML parse error in {source}: {detail}"),
+            "xml_parse_failure",
+            &[("path", source.into()), ("detail", detail.to_string())],
+        )
+    }
+
+    fn reconstruction_error(def_id: &str, detail: impl std::fmt::Display, kind: &str) -> Self {
+        let (code, prefix) = match kind {
+            "text" => ("xml_reconstruction_text_failure", "text decode failed: "),
+            "attribute" => (
+                "xml_reconstruction_attribute_failure",
+                "attribute decode failed: ",
+            ),
+            _ => ("xml_reconstruction_parse_failure", ""),
+        };
+        Self::new(
+            format!("internal XML reconstruction error for {def_id}: {prefix}{detail}"),
+            code,
+            &[("def_id", def_id.into()), ("detail", detail.to_string())],
+        )
+    }
+}
+
+impl From<rcd_core::content_files::ContentWarning> for XmlIssue {
+    fn from(warning: rcd_core::content_files::ContentWarning) -> Self {
+        Self {
+            message: warning.message,
+            code: Some(warning.code.into()),
+            params: warning.params,
+        }
+    }
+}
 
 /// The XML detector for RimWorld mods.
 ///
@@ -39,24 +92,30 @@ impl Detector for XmlDetector {
                 // Parse all roots together so first-wins file precedence spans
                 // the complete LoadFolders priority list.
                 let (defs, abstract_skipped, unnamed, io_errors) =
-                    def_parser::parse_defs_dirs(&mod_data.defs_paths);
-                for err_msg in io_errors {
+                    def_parser::parse_defs_dirs_structured(&mod_data.defs_paths);
+                for issue in io_errors {
                     diagnostics.push(Diagnostic {
                         affected_mod: Some(mod_summary.package_id.clone()),
                         severity: Severity::Warning,
-                        message: err_msg,
+                        message: issue.message,
                         source: DiagnosticSource::XmlParsing,
+                        analysis_incomplete: true,
+                        code: issue.code,
+                        params: issue.params,
                     });
                 }
 
                 let (patches, patch_errors) =
-                    patch_ops::parse_patches_dirs(&mod_data.patches_paths);
-                for err_msg in patch_errors {
+                    patch_ops::parse_patches_dirs_structured(&mod_data.patches_paths);
+                for issue in patch_errors {
                     diagnostics.push(Diagnostic {
                         affected_mod: Some(mod_summary.package_id.clone()),
                         severity: Severity::Warning,
-                        message: err_msg,
+                        message: issue.message,
                         source: DiagnosticSource::XmlParsing,
+                        analysis_incomplete: true,
+                        code: issue.code,
+                        params: issue.params,
                     });
                 }
 
@@ -69,6 +128,9 @@ impl Detector for XmlDetector {
                             abstract_skipped
                         ),
                         source: DiagnosticSource::XmlParsing,
+                        analysis_incomplete: true,
+                        code: Some("xml_abstract_defs_skipped".into()),
+                        params: [("count".into(), abstract_skipped.to_string())].into_iter().collect(),
                     });
                 }
                 if unnamed > 0 {
@@ -80,6 +142,9 @@ impl Detector for XmlDetector {
                             unnamed
                         ),
                         source: DiagnosticSource::XmlParsing,
+                        analysis_incomplete: true,
+                        code: Some("xml_unnamed_defs_skipped".into()),
+                        params: [("count".into(), unnamed.to_string())].into_iter().collect(),
                     });
                 }
                 (mod_summary, defs, patches, diagnostics)
@@ -106,14 +171,17 @@ impl Detector for XmlDetector {
 
         // 3. Detect direct replacement conflicts
         let (replacement_conflicts, recon_errors) =
-            replacement::detect_replacements(&all_mod_defs, order);
+            replacement::detect_replacements_structured(&all_mod_defs, order);
         all_conflicts.extend(replacement_conflicts);
-        for msg in recon_errors {
+        for issue in recon_errors {
             all_diagnostics.push(Diagnostic {
                 affected_mod: None,
                 severity: Severity::Warning,
-                message: msg,
+                message: issue.message,
                 source: DiagnosticSource::XmlParsing,
+                analysis_incomplete: true,
+                code: issue.code,
+                params: issue.params,
             });
         }
 
@@ -159,6 +227,210 @@ mod integration_tests {
     use super::*;
     use rcd_core::folder::discover_mods;
     use rcd_core::testutil::fixtures_path;
+
+    #[cfg(unix)]
+    #[test]
+    fn skipped_defs_and_patch_symlinks_are_incomplete_diagnostics() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("About")).unwrap();
+        std::fs::write(
+            root.path().join("About/About.xml"),
+            "<ModMetaData><packageId>test.symlink</packageId></ModMetaData>",
+        )
+        .unwrap();
+        for folder in ["Defs", "Patches"] {
+            std::fs::create_dir(root.path().join(folder)).unwrap();
+            symlink("missing.xml", root.path().join(folder).join("skipped.xml")).unwrap();
+        }
+        let mut m = rcd_core::about_xml::parse_about_xml(root.path()).unwrap();
+        m.defs_paths = vec![root.path().join("Defs")];
+        m.patches_paths = vec![root.path().join("Patches")];
+        let (_, diags) = XmlDetector.analyze(&[m], None);
+        for folder in ["Defs", "Patches"] {
+            let diagnostic = diags
+                .iter()
+                .find(|d| d.message.contains(folder) && d.message.contains("skipped.xml"))
+                .unwrap();
+            assert_eq!(diagnostic.code.as_deref(), Some("content_symlink_skipped"));
+            assert!(diagnostic.params["path"].contains(folder));
+            assert!(
+                diags.iter().any(|d| d.analysis_incomplete
+                    && d.message.contains(folder)
+                    && d.message.contains("skipped.xml")),
+                "{diags:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_xml_is_an_incomplete_warning() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("About")).unwrap();
+        std::fs::write(
+            root.path().join("About/About.xml"),
+            "<ModMetaData><packageId>test.invalid</packageId></ModMetaData>",
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join("Defs")).unwrap();
+        std::fs::write(root.path().join("Defs/invalid.xml"), [0xff]).unwrap();
+        let mut m = rcd_core::about_xml::parse_about_xml(root.path()).unwrap();
+        m.defs_paths = vec![root.path().join("Defs")];
+        let (_, diagnostics) = XmlDetector.analyze(&[m], None);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.message.contains("invalid.xml"))
+            .unwrap();
+        assert_eq!(diagnostic.code.as_deref(), Some("xml_read_failure"));
+        assert!(diagnostic.params["path"].contains("invalid.xml"));
+        assert!(!diagnostic.params["detail"].is_empty());
+        assert!(
+            diagnostics.iter().any(|d| d.severity == Severity::Warning
+                && d.analysis_incomplete
+                && d.message.contains("invalid.xml")),
+            "{diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn truncated_defs_and_patches_carry_unclosed_counts() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("About")).unwrap();
+        std::fs::write(
+            root.path().join("About/About.xml"),
+            "<ModMetaData><packageId>test.truncated</packageId></ModMetaData>",
+        )
+        .unwrap();
+        for (folder, xml) in [
+            ("Defs", "<Defs><ThingDef>"),
+            ("Patches", "<Patch><Operation>"),
+        ] {
+            std::fs::create_dir(root.path().join(folder)).unwrap();
+            std::fs::write(root.path().join(folder).join("truncated.xml"), xml).unwrap();
+        }
+        let mut m = rcd_core::about_xml::parse_about_xml(root.path()).unwrap();
+        m.defs_paths = vec![root.path().join("Defs")];
+        m.patches_paths = vec![root.path().join("Patches")];
+        let (_, diagnostics) = XmlDetector.analyze(&[m], None);
+        for folder in ["Defs", "Patches"] {
+            let diagnostic = diagnostics
+                .iter()
+                .find(|d| d.message.contains(folder) && d.message.contains("unclosed element"))
+                .unwrap();
+            assert_eq!(diagnostic.code.as_deref(), Some("xml_unclosed_elements"));
+            assert_eq!(diagnostic.params["count"], "2");
+            assert!(diagnostic.params["path"].contains(folder));
+            assert!(diagnostic.analysis_incomplete);
+        }
+    }
+
+    #[test]
+    fn nested_def_name_carries_structured_diagnostic() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("About")).unwrap();
+        std::fs::write(
+            root.path().join("About/About.xml"),
+            "<ModMetaData><packageId>test.nested</packageId></ModMetaData>",
+        )
+        .unwrap();
+        for (folder, xml) in [
+            (
+                "Defs",
+                "<Defs><ThingDef><defName><b/></defName></ThingDef></Defs>",
+            ),
+            (
+                "Patches",
+                "<Patch><Operation Class=\"PatchOperationAdd\"><xpath><b/></xpath></Operation></Patch>",
+            ),
+        ] {
+            std::fs::create_dir(root.path().join(folder)).unwrap();
+            std::fs::write(root.path().join(folder).join("nested.xml"), xml).unwrap();
+        }
+        let mut m = rcd_core::about_xml::parse_about_xml(root.path()).unwrap();
+        m.defs_paths = vec![root.path().join("Defs")];
+        m.patches_paths = vec![root.path().join("Patches")];
+        let (_, diagnostics) = XmlDetector.analyze(&[m], None);
+        let def = diagnostics
+            .iter()
+            .find(|d| d.message.contains("defName") && d.message.contains("nested markup"))
+            .unwrap();
+        assert_eq!(def.code.as_deref(), Some("xml_def_name_nested"));
+        assert!(def.params["path"].contains("Defs"));
+    }
+
+    #[test]
+    fn nested_patch_xpath_carries_structured_diagnostic() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("nested.xml");
+        std::fs::write(
+            &path,
+            "<Patch><Operation Class=\"PatchOperationAdd\"><xpath><b/></xpath></Operation></Patch>",
+        )
+        .unwrap();
+        let (_, issues) = patch_ops::parse_patches_dirs_structured(&[root.path().into()]);
+        let issue = issues
+            .iter()
+            .find(|d| d.message.contains("Nested element"))
+            .unwrap();
+        assert_eq!(issue.code.as_deref(), Some("xml_text_nested"));
+        assert_eq!(issue.params["element"], "xpath");
+        assert_eq!(issue.params["path"], path.to_string_lossy());
+    }
+
+    #[test]
+    fn reconstruction_failure_reaches_detector_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        let mut mods = Vec::new();
+        for name in ["a", "b"] {
+            let path = root.path().join(name);
+            std::fs::create_dir_all(path.join("About")).unwrap();
+            std::fs::create_dir_all(path.join("Defs")).unwrap();
+            std::fs::write(
+                path.join("About/About.xml"),
+                format!("<ModMetaData><packageId>test.{name}</packageId></ModMetaData>"),
+            )
+            .unwrap();
+            std::fs::write(
+                path.join("Defs/a.xml"),
+                "<Defs><ThingDef><defName>Steel</defName><label>&bogus;</label></ThingDef></Defs>",
+            )
+            .unwrap();
+            let mut m = rcd_core::about_xml::parse_about_xml(&path).unwrap();
+            m.defs_paths = vec![path.join("Defs")];
+            mods.push(m);
+        }
+        let (_, diagnostics) = XmlDetector.analyze(&mods, None);
+        let diagnostic = diagnostics
+            .iter()
+            .find(|d| d.code.as_deref() == Some("xml_reconstruction_text_failure"))
+            .unwrap();
+        assert_eq!(diagnostic.params["def_id"], "ThingDef:Steel");
+        assert!(!diagnostic.params["detail"].is_empty());
+        assert_eq!(diagnostic.severity, Severity::Warning);
+        assert!(diagnostic.analysis_incomplete);
+    }
+
+    #[test]
+    fn failed_xml_analysis_is_incomplete() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("About")).unwrap();
+        std::fs::write(
+            root.path().join("About/About.xml"),
+            "<ModMetaData><packageId>test.broken</packageId></ModMetaData>",
+        )
+        .unwrap();
+        std::fs::create_dir(root.path().join("Defs")).unwrap();
+        std::fs::write(root.path().join("Defs/broken.xml"), "<Defs><ThingDef>").unwrap();
+        let mut m = rcd_core::about_xml::parse_about_xml(root.path()).unwrap();
+        m.defs_paths = vec![root.path().join("Defs")];
+        let (_, diags) = XmlDetector.analyze(&[m], None);
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.analysis_incomplete && d.source == DiagnosticSource::XmlParsing),
+            "{diags:?}"
+        );
+    }
 
     #[test]
     fn xml_detector_finds_steel_conflict() {
@@ -422,6 +694,11 @@ mod integration_tests {
             .collect();
 
         assert_eq!(abstract_diags.len(), 1);
+        assert_eq!(
+            abstract_diags[0].code.as_deref(),
+            Some("xml_abstract_defs_skipped")
+        );
+        assert_eq!(abstract_diags[0].params["count"], "1");
         assert_eq!(abstract_diags[0].severity, Severity::Info);
         assert!(abstract_diags[0].message.contains("1 abstract def"));
         assert_eq!(
@@ -484,7 +761,13 @@ mod integration_tests {
             1,
             "one aggregated Info per mod: {diagnostics:?}"
         );
+        assert_eq!(
+            unnamed_diags[0].code.as_deref(),
+            Some("xml_unnamed_defs_skipped")
+        );
+        assert_eq!(unnamed_diags[0].params["count"], "2");
         assert_eq!(unnamed_diags[0].severity, Severity::Info);
+        assert!(unnamed_diags[0].analysis_incomplete);
         assert!(unnamed_diags[0].message.contains("2 def(s)"));
         assert_eq!(
             unnamed_diags[0].affected_mod.as_deref(),

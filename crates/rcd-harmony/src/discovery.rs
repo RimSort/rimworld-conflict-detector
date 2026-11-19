@@ -1,4 +1,4 @@
-use rcd_core::content_files::collect_files_with_precedence;
+use rcd_core::content_files::{ContentWarning, collect_files_with_precedence_structured};
 use std::path::{Path, PathBuf};
 
 /// DLL file-stem prefixes to skip during assembly discovery.
@@ -24,7 +24,17 @@ pub fn discover_assemblies(assemblies_dir: &Path) -> (Vec<PathBuf>, Vec<String>)
 /// Discover mod-specific DLL assemblies from high-priority-first directories.
 /// The first file for each case-sensitive relative path wins across all roots.
 pub fn discover_assemblies_dirs(dirs: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
-    let (files, errors) = collect_files_with_precedence(dirs);
+    let (paths, errors) = discover_assemblies_dirs_structured(dirs);
+    (
+        paths,
+        errors.into_iter().map(|error| error.message).collect(),
+    )
+}
+
+pub fn discover_assemblies_dirs_structured(
+    dirs: &[PathBuf],
+) -> (Vec<PathBuf>, Vec<ContentWarning>) {
+    let (files, errors) = collect_files_with_precedence_structured(dirs);
     let paths = files
         .into_iter()
         .filter(|path| {

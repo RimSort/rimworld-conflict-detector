@@ -24,6 +24,17 @@ pub fn detect_replacements(
     all_mod_defs: &[ModDefs],
     order: Option<&LoadOrder>,
 ) -> (Vec<Conflict>, Vec<String>) {
+    let (conflicts, errors) = detect_replacements_structured(all_mod_defs, order);
+    (
+        conflicts,
+        errors.into_iter().map(|issue| issue.message).collect(),
+    )
+}
+
+pub(crate) fn detect_replacements_structured(
+    all_mod_defs: &[ModDefs],
+    order: Option<&LoadOrder>,
+) -> (Vec<Conflict>, Vec<crate::XmlIssue>) {
     // Build a map: (def_type, def_name) -> Vec<(ModSummary, raw_xml)>
     type DefEntries = Vec<(ModSummary, String)>;
     let mut def_map: HashMap<(String, String), DefEntries> = HashMap::new();
@@ -98,8 +109,8 @@ pub fn detect_replacements(
 
     // Byte-identical reconstruction errors repeat per comparison pair and
     // def_map iteration order is nondeterministic run-to-run; canonicalize.
-    errors.sort();
-    errors.dedup();
+    errors.sort_by(|a, b| (&a.message, &a.code, &a.params).cmp(&(&b.message, &b.code, &b.params)));
+    errors.dedup_by(|a, b| (&a.message, &a.code, &a.params) == (&b.message, &b.code, &b.params));
 
     (conflicts, errors)
 }
@@ -107,7 +118,7 @@ pub fn detect_replacements(
 /// Normalizes an XML string for semantic comparison by re-parsing it and
 /// rebuilding a canonical form. This strips insignificant whitespace between
 /// tags so that formatting differences don't trigger false conflicts.
-fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> String {
+fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<crate::XmlIssue>) -> String {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -124,9 +135,7 @@ fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> Stri
                 let attrs = match canonical_attrs(e, &reader) {
                     Ok(attrs) => attrs,
                     Err(error) => {
-                        errors.push(format!(
-                            "internal XML reconstruction error for {def_id}: {error}"
-                        ));
+                        errors.push(error.into_issue(def_id));
                         return format!("!invalid-xml:{s}");
                     }
                 };
@@ -142,7 +151,7 @@ fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> Stri
                     result.push_str(&trimmed);
                 }
                 Err(error) => {
-                    errors.push(format!("internal XML reconstruction error for {def_id}: text decode failed: {error}"));
+                    errors.push(crate::XmlIssue::reconstruction_error(def_id, error, "text"));
                     return format!("!invalid-xml:{s}");
                 }
             },
@@ -159,9 +168,7 @@ fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> Stri
                 let attrs = match canonical_attrs(e, &reader) {
                     Ok(attrs) => attrs,
                     Err(error) => {
-                        errors.push(format!(
-                            "internal XML reconstruction error for {def_id}: {error}"
-                        ));
+                        errors.push(error.into_issue(def_id));
                         return format!("!invalid-xml:{s}");
                     }
                 };
@@ -169,8 +176,8 @@ fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> Stri
             }
             Ok(Event::Eof) => break,
             Err(error) => {
-                errors.push(format!(
-                    "internal XML reconstruction error for {def_id}: {error}"
+                errors.push(crate::XmlIssue::reconstruction_error(
+                    def_id, error, "parse",
                 ));
                 return format!("!invalid-xml:{s}");
             }
@@ -187,7 +194,7 @@ fn normalize_whitespace(s: &str, def_id: &str, errors: &mut Vec<String>) -> Stri
 fn find_divergent_fields(
     entries: &[(ModSummary, String)],
     def_id: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) -> Vec<String> {
     if entries.len() < 2 {
         return Vec::new();
@@ -240,18 +247,39 @@ fn find_divergent_fields(
     divergent
 }
 
+enum AttributeError {
+    Syntax(String),
+    Decode { attribute: String, detail: String },
+}
+
+impl AttributeError {
+    fn into_issue(self, def_id: &str) -> crate::XmlIssue {
+        match self {
+            Self::Syntax(detail) => crate::XmlIssue::reconstruction_error(def_id, detail, "parse"),
+            Self::Decode { attribute, detail } => {
+                let mut issue = crate::XmlIssue::reconstruction_error(def_id, detail, "attribute");
+                issue.params.insert("attribute".into(), attribute);
+                issue
+            }
+        }
+    }
+}
+
 /// Canonicalizes attributes by decoded XML value, then safely re-escapes them.
 fn canonical_attrs(
     element: &quick_xml::events::BytesStart<'_>,
     reader: &quick_xml::Reader<&[u8]>,
-) -> Result<String, String> {
+) -> Result<String, AttributeError> {
     let mut attributes = Vec::new();
     for attribute in element.attributes() {
-        let attribute = attribute.map_err(|error| error.to_string())?;
+        let attribute = attribute.map_err(|error| AttributeError::Syntax(error.to_string()))?;
         let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
         let value = attribute
             .decode_and_unescape_value(reader.decoder())
-            .map_err(|error| format!("attribute decode failed: {error}"))?;
+            .map_err(|error| AttributeError::Decode {
+                attribute: key.clone(),
+                detail: error.to_string(),
+            })?;
         let escaped = value
             .replace('&', "&amp;")
             .replace('<', "&lt;")
@@ -272,7 +300,7 @@ fn canonical_attrs(
 fn extract_root_attributes(
     xml: &str,
     def_id: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) -> BTreeMap<String, String> {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
@@ -282,28 +310,41 @@ fn extract_root_attributes(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(event)) | Ok(Event::Empty(event)) => {
-                return event
-                    .attributes()
-                    .map(|attribute| {
-                        let attribute = attribute.map_err(quick_xml::Error::from)?;
-                        let value = attribute.decode_and_unescape_value(reader.decoder())?;
-                        Ok((
-                            String::from_utf8_lossy(attribute.key.as_ref()).into_owned(),
-                            value.into_owned(),
-                        ))
-                    })
-                    .collect::<Result<BTreeMap<_, _>, quick_xml::Error>>()
-                    .map_err(|error| {
-                        errors.push(format!(
-                            "internal XML reconstruction error for {def_id}: attribute decode failed: {error}"
-                        ));
-                    })
-                    .unwrap_or_default();
+                let mut attributes = BTreeMap::new();
+                for attribute in event.attributes() {
+                    let attribute = match attribute {
+                        Ok(attribute) => attribute,
+                        Err(error) => {
+                            errors.push(crate::XmlIssue::reconstruction_error(
+                                def_id,
+                                quick_xml::Error::from(error),
+                                "attribute",
+                            ));
+                            return BTreeMap::new();
+                        }
+                    };
+                    let key = String::from_utf8_lossy(attribute.key.as_ref()).into_owned();
+                    let value = match attribute.decode_and_unescape_value(reader.decoder()) {
+                        Ok(value) => value.into_owned(),
+                        Err(error) => {
+                            errors.push(
+                                AttributeError::Decode {
+                                    attribute: key,
+                                    detail: error.to_string(),
+                                }
+                                .into_issue(def_id),
+                            );
+                            return BTreeMap::new();
+                        }
+                    };
+                    attributes.insert(key, value);
+                }
+                return attributes;
             }
             Ok(Event::Eof) => return BTreeMap::new(),
             Err(error) => {
-                errors.push(format!(
-                    "internal XML reconstruction error for {def_id}: {error}"
+                errors.push(crate::XmlIssue::reconstruction_error(
+                    def_id, error, "parse",
                 ));
                 return BTreeMap::new();
             }
@@ -315,7 +356,7 @@ fn extract_root_attributes(
 
 /// Extracts immediate child tag names from a def's raw XML.
 /// Very simple: looks for `<TagName>` patterns at the first nesting level.
-fn extract_child_tags(xml: &str, def_id: &str, errors: &mut Vec<String>) -> Vec<String> {
+fn extract_child_tags(xml: &str, def_id: &str, errors: &mut Vec<crate::XmlIssue>) -> Vec<String> {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
 
@@ -352,10 +393,7 @@ fn extract_child_tags(xml: &str, def_id: &str, errors: &mut Vec<String>) -> Vec<
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!(
-                    "internal XML reconstruction error for {}: {}",
-                    def_id, e
-                ));
+                errors.push(crate::XmlIssue::reconstruction_error(def_id, e, "parse"));
                 break;
             }
             _ => {}
@@ -372,7 +410,7 @@ fn extract_tag_content(
     xml: &str,
     target_tag: &str,
     def_id: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) -> Option<String> {
     use quick_xml::events::Event;
     use quick_xml::reader::Reader;
@@ -402,7 +440,8 @@ fn extract_tag_content(
                     match t.unescape() {
                         Ok(text) => captured.push_str(&text),
                         Err(error) => {
-                            errors.push(format!("internal XML reconstruction error for {def_id}: text decode failed: {error}"));
+                            errors
+                                .push(crate::XmlIssue::reconstruction_error(def_id, error, "text"));
                             captured.push_str(&format!(
                                 "!invalid-text:{}",
                                 String::from_utf8_lossy(t.as_ref())
@@ -434,10 +473,7 @@ fn extract_tag_content(
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!(
-                    "internal XML reconstruction error for {}: {}",
-                    def_id, e
-                ));
+                errors.push(crate::XmlIssue::reconstruction_error(def_id, e, "parse"));
                 break;
             }
             _ => {}
@@ -452,6 +488,95 @@ fn extract_tag_content(
 mod tests {
     use super::*;
     use rcd_core::testutil::test_mod_summary_named;
+
+    #[test]
+    fn reconstruction_diagnostic_identity_preserves_attributes_and_coalesces_repeats() {
+        for attributes in [["attr0", "attr1"], ["attr0", "attr0"]] {
+            let defs = attributes
+                .iter()
+                .enumerate()
+                .map(|(i, attr)| ModDefs {
+                    mod_summary: test_mod_summary_named(&format!("mod.{i}"), &format!("Mod {i}")),
+                    defs: vec![ParsedDef {
+                        def_type: "ThingDef".into(),
+                        def_name: "Steel".into(),
+                        raw_xml: format!("<ThingDef {attr}=\"&bogus;\"/>"),
+                        source_file: "a.xml".into(),
+                    }],
+                })
+                .collect::<Vec<_>>();
+            let expected = if attributes[0] == attributes[1] {
+                vec!["attr0"]
+            } else {
+                vec!["attr0", "attr1"]
+            };
+            for input in [defs.clone(), defs.into_iter().rev().collect()] {
+                let (_, issues) = detect_replacements_structured(&input, None);
+                let actual = issues
+                    .iter()
+                    .filter(|issue| {
+                        issue.code.as_deref() == Some("xml_reconstruction_attribute_failure")
+                    })
+                    .map(|issue| issue.params["attribute"].as_str())
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn reconstruction_text_failure_carries_def_and_detail() {
+        let def = ParsedDef {
+            def_type: "ThingDef".into(),
+            def_name: "Steel".into(),
+            raw_xml: "<ThingDef><label>&bogus;</label></ThingDef>".into(),
+            source_file: "a.xml".into(),
+        };
+        let a = ModDefs {
+            mod_summary: test_mod_summary_named("a", "A"),
+            defs: vec![def.clone()],
+        };
+        let b = ModDefs {
+            mod_summary: test_mod_summary_named("b", "B"),
+            defs: vec![def],
+        };
+        let (_, issues) = detect_replacements_structured(&[a, b], None);
+        let issue = issues
+            .iter()
+            .find(|issue| issue.code.as_deref() == Some("xml_reconstruction_text_failure"))
+            .unwrap();
+        assert_eq!(issue.params["def_id"], "ThingDef:Steel");
+        assert!(!issue.params["detail"].is_empty());
+        assert!(issue.message.starts_with(
+            "internal XML reconstruction error for ThingDef:Steel: text decode failed:"
+        ));
+    }
+
+    #[test]
+    fn reconstruction_attribute_failure_names_the_attribute() {
+        let def = ParsedDef {
+            def_type: "ThingDef".into(),
+            def_name: "Steel".into(),
+            raw_xml: "<ThingDef Label=\"&bogus;\"/>".into(),
+            source_file: "a.xml".into(),
+        };
+        let a = ModDefs {
+            mod_summary: test_mod_summary_named("a", "A"),
+            defs: vec![def.clone()],
+        };
+        let b = ModDefs {
+            mod_summary: test_mod_summary_named("b", "B"),
+            defs: vec![def],
+        };
+        let (_, issues) = detect_replacements_structured(&[a, b], None);
+        let issue = issues
+            .iter()
+            .find(|issue| issue.code.as_deref() == Some("xml_reconstruction_attribute_failure"))
+            .unwrap();
+        assert_eq!(issue.params["attribute"], "Label");
+        assert_eq!(issue.params["def_id"], "ThingDef:Steel");
+        assert!(!issue.params["detail"].is_empty());
+    }
 
     #[test]
     fn detect_replacements_reports_internal_reconstruction_errors() {

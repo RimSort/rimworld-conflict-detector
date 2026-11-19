@@ -22,6 +22,14 @@ pub fn validate_load_order(mods: &[Mod], order: &LoadOrder) -> Vec<Diagnostic> {
                         m.package_id, dep
                     ),
                     source: DiagnosticSource::MetadataResolution,
+                    analysis_incomplete: false,
+                    code: Some("load_after_violation".into()),
+                    params: [
+                        ("mod".into(), m.package_id.clone()),
+                        ("dependency".into(), dep.clone()),
+                    ]
+                    .into_iter()
+                    .collect(),
                 });
             }
         }
@@ -39,6 +47,14 @@ pub fn validate_load_order(mods: &[Mod], order: &LoadOrder) -> Vec<Diagnostic> {
                         m.package_id, dep
                     ),
                     source: DiagnosticSource::MetadataResolution,
+                    analysis_incomplete: false,
+                    code: Some("load_before_violation".into()),
+                    params: [
+                        ("mod".into(), m.package_id.clone()),
+                        ("dependency".into(), dep.clone()),
+                    ]
+                    .into_iter()
+                    .collect(),
                 });
             }
         }
@@ -56,6 +72,9 @@ pub fn validate_load_order(mods: &[Mod], order: &LoadOrder) -> Vec<Diagnostic> {
                         m.package_id, dep
                     ),
                     source: DiagnosticSource::MetadataResolution,
+                    analysis_incomplete: false,
+                    code: Some("force_load_after_violation".into()),
+                    params: [("mod".into(), m.package_id.clone()), ("dependency".into(), dep.clone())].into_iter().collect(),
                 });
             }
         }
@@ -73,6 +92,9 @@ pub fn validate_load_order(mods: &[Mod], order: &LoadOrder) -> Vec<Diagnostic> {
                         m.package_id, dep
                     ),
                     source: DiagnosticSource::MetadataResolution,
+                    analysis_incomplete: false,
+                    code: Some("force_load_before_violation".into()),
+                    params: [("mod".into(), m.package_id.clone()), ("dependency".into(), dep.clone())].into_iter().collect(),
                 });
             }
         }
@@ -107,6 +129,40 @@ mod tests {
     }
 
     #[test]
+    fn structured_load_order_violations() {
+        let mut a = test_mod("mod.a", vec!["mod.b"], vec![]);
+        a.force_load_after.push("mod.b".into());
+        let mut b = test_mod("mod.b", vec![], vec!["mod.a"]);
+        b.force_load_before.push("mod.a".into());
+        let diagnostics = validate_load_order(
+            &[a, b],
+            &LoadOrder::new(vec!["mod.a".into(), "mod.b".into()]),
+        );
+        let codes = [
+            "load_after_violation",
+            "force_load_after_violation",
+            "load_before_violation",
+            "force_load_before_violation",
+        ];
+        assert_eq!(diagnostics.len(), codes.len());
+        for (diagnostic, code) in diagnostics.iter().zip(codes) {
+            assert_eq!(diagnostic.code.as_deref(), Some(code));
+            assert_eq!(
+                diagnostic.params["mod"],
+                diagnostic.affected_mod.as_deref().unwrap()
+            );
+            assert_eq!(
+                diagnostic.params["dependency"],
+                if diagnostic.params["mod"] == "mod.a" {
+                    "mod.b"
+                } else {
+                    "mod.a"
+                }
+            );
+        }
+    }
+
+    #[test]
     fn load_after_violation() {
         let mods = vec![
             test_mod("mod.a", vec!["mod.b"], vec![]),
@@ -118,6 +174,18 @@ mod tests {
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].severity, Severity::Warning);
         assert!(diags[0].message.contains("loadAfter"));
+    }
+
+    #[test]
+    fn force_load_violation_does_not_make_analysis_incomplete() {
+        let mut first = test_mod("mod.a", vec![], vec![]);
+        first.force_load_after.push("mod.b".into());
+        let mods = vec![first, test_mod("mod.b", vec![], vec![])];
+        let diagnostics =
+            validate_load_order(&mods, &LoadOrder::new(vec!["mod.a".into(), "mod.b".into()]));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].severity, Severity::Error);
+        assert!(!diagnostics[0].analysis_incomplete);
     }
 
     #[test]

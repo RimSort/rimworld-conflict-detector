@@ -77,6 +77,47 @@ fn json_total_failure_exits_2_with_report_on_stdout() {
     );
 }
 
+#[test]
+fn two_mod_json_contains_derived_severity_and_diagnostic_impact() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, id) in [("A", "test.a"), ("B", "test.b")] {
+        let path = dir.path().join(name);
+        write_about(
+            &path,
+            &format!("<ModMetaData><packageId>{id}</packageId></ModMetaData>"),
+        );
+        fs::create_dir_all(path.join("Defs")).unwrap();
+        fs::write(path.join("Defs/shared.xml"), format!("<Defs><ThingDef><defName>Steel</defName><label>{name}</label></ThingDef><SongDef><label>unnamed</label></SongDef></Defs>")).unwrap();
+    }
+    let out = rcd()
+        .args([
+            "--format",
+            "json",
+            "scan",
+            "--dir",
+            dir.path().to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1), "{}", stderr_string(&out));
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["schema_version"], 3);
+    assert!(
+        report["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["type"] == "def" && c["severity"] == "error")
+    );
+    assert!(
+        report["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["severity"] == "info" && d["analysis_incomplete"] == true)
+    );
+}
+
 /// (b) A clean single-mod scan → exit 0.
 #[test]
 fn clean_scan_exits_0() {
