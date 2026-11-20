@@ -4,19 +4,30 @@
 
 ### Breaking
 
-- Reports use schema version 2, adding the `xpath_same_def_non_overlap` mechanism with aggregated XPath pairs. Existing mechanism tags are unchanged.
+- Reports use schema version 3, with Rust-derived conflict severity and diagnostic completeness; the `xpath_same_def_non_overlap` mechanism carries aggregated XPath pairs.
 - `list-mods --format json` returns `{ "mods": [...], "diagnostics": [...] }` instead of a bare array, including empty and partially resolved results.
 - FFI configuration rejects invalid types for known fields instead of silently using defaults. Unknown fields produce a warning and analysis continues; omitted fields retain their defaults.
 
 ### Added
 
+- Add optional, defaultable diagnostic `code` and named string `params` fields
+  for metadata, load-order and folder resolution, XML reads, structural parsing,
+  replacement reconstruction and skipped-def counts, DLL scanning, FFI
+  configuration, and CLI input resolution. Consumers can use stable templates
+  for known codes; absent or unknown codes fall back to the raw message, and
+  embedded error details remain raw.
 - Active-mod-aware `LoadFolders.xml` resolution with `IfModActive`, `IfModNotActive`, and `IfModActiveAll`, version/default selection, and visible fallback diagnostics.
 - Deterministic file overlays across Defs, Patches, and Assemblies; later explicitly listed folders override earlier folders by relative file path.
 - One Info finding per concrete def and mod pair for non-overlapping XPath patches, retaining unique XPath pairs.
-- A 50 MiB per-file limit for XML inputs and a 64-level recursive patch-operation limit, with diagnostics for skipped content.
+- A 64-level recursive patch-operation limit, with diagnostics for skipped content.
 
 ### Fixed
 
+- Follow a unique LoadFolders selector link to a regular file; warn as incomplete and fall back on unusable or competing selector names.
+- Reject About metadata with elements left open at end of input through the existing parse-failure diagnostic.
+- Preserve distinct replacement reconstruction diagnostics by their full represented message, code and params while coalescing exact repeats.
+- Reject duplicate parsed package IDs in FFI requests, preserving metadata diagnostics; warn when invalid game versions require fallback.
+- Surface manual DLL read failures as incomplete diagnostics; XML and DLL reads remain uncapped.
 - Include implicit root content alongside version and Common folders; normalize revision-suffixed game versions before directory selection.
 - Resolve the complete active set before conditional folder selection in CLI and FFI input modes; share official base-content classification.
 - Report every distinct replacing mod when XPath patches target replaced defs, excluding self-conflicts.
@@ -33,4 +44,4 @@
 
 - Clarify that the FFI progress callback's phase pointer is valid only during the synchronous callback.
 - Document conservative static treatment of `PatchOperationSequence.success` rather than simulating runtime outcomes.
-- Document the 50 MiB XML and 64-level patch-operation ceilings and that implicit fallback covers version, `Common/`, and the mod root.
+- Document uncapped input/report memory risks, the 64-level patch-operation limit, and implicit fallback across version, `Common/`, and the mod root.

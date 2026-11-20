@@ -1,6 +1,6 @@
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use rcd_core::content_files::collect_files_with_precedence;
+use rcd_core::content_files::collect_files_with_precedence_structured;
 use rcd_core::xml_io::read_xml_file;
 use std::path::{Path, PathBuf};
 
@@ -23,11 +23,23 @@ pub fn parse_defs_dir(dir: &Path) -> (Vec<ParsedDef>, usize, usize, Vec<String>)
 /// Parses XML files from directories in high-priority-first order. A file in
 /// the first directory wins for each case-sensitive relative path.
 pub fn parse_defs_dirs(dirs: &[PathBuf]) -> (Vec<ParsedDef>, usize, usize, Vec<String>) {
-    let (files, enumeration_errors) = collect_files_with_precedence(dirs);
+    let (defs, skipped, unnamed, errors) = parse_defs_dirs_structured(dirs);
+    (
+        defs,
+        skipped,
+        unnamed,
+        errors.into_iter().map(|issue| issue.message).collect(),
+    )
+}
+
+pub(crate) fn parse_defs_dirs_structured(
+    dirs: &[PathBuf],
+) -> (Vec<ParsedDef>, usize, usize, Vec<crate::XmlIssue>) {
+    let (files, enumeration_errors) = collect_files_with_precedence_structured(dirs);
     let mut defs = Vec::new();
     let mut total_skipped = 0;
     let mut total_unnamed = 0;
-    let mut errors = enumeration_errors;
+    let mut errors: Vec<crate::XmlIssue> = enumeration_errors.into_iter().map(Into::into).collect();
 
     for path in files {
         if !path
@@ -40,13 +52,22 @@ pub fn parse_defs_dirs(dirs: &[PathBuf]) -> (Vec<ParsedDef>, usize, usize, Vec<S
             Ok(contents) => {
                 let source = path.to_string_lossy().to_string();
                 let (parsed, skipped, unnamed, xml_errors) =
-                    parse_defs_from_xml(&contents, &source);
+                    parse_defs_from_xml_structured(&contents, &source);
                 defs.extend(parsed);
                 total_skipped += skipped;
                 total_unnamed += unnamed;
                 errors.extend(xml_errors);
             }
-            Err(error) => errors.push(format!("Failed to read {}: {}", path.display(), error)),
+            Err(error) => errors.push(crate::XmlIssue {
+                message: format!("Failed to read {}: {}", path.display(), error),
+                code: Some("xml_read_failure".into()),
+                params: [
+                    ("path".into(), path.display().to_string()),
+                    ("detail".into(), error.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            }),
         }
     }
     (defs, total_skipped, total_unnamed, errors)
@@ -61,7 +82,12 @@ pub fn parse_defs_dirs(dirs: &[PathBuf]) -> (Vec<ParsedDef>, usize, usize, Vec<S
 /// scan tracks element depth and reports unclosed elements at Eof; the Err
 /// message is byte-identical to the structural captures so the callers'
 /// sort+dedup collapses the guaranteed duplicate pair (M-2).
+#[cfg(test)]
 pub(crate) fn check_well_formed(xml: &str, source: &str) -> Option<String> {
+    check_well_formed_structured(xml, source).map(|issue| issue.message)
+}
+
+pub(crate) fn check_well_formed_structured(xml: &str, source: &str) -> Option<crate::XmlIssue> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
@@ -72,17 +98,35 @@ pub(crate) fn check_well_formed(xml: &str, source: &str) -> Option<String> {
             Ok(Event::End(_)) => depth = depth.saturating_sub(1),
             Ok(Event::Eof) => {
                 return if depth > 0 {
-                    Some(format!(
-                        "XML parse error in {}: document ends with {} unclosed element(s) (results may be incomplete)",
-                        source, depth
-                    ))
+                    Some(crate::XmlIssue {
+                        message: format!(
+                            "XML parse error in {}: document ends with {} unclosed element(s) (results may be incomplete)",
+                            source, depth
+                        ),
+                        code: Some("xml_unclosed_elements".into()),
+                        params: [
+                            ("path".into(), source.into()),
+                            ("count".into(), depth.to_string()),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    })
                 } else {
                     None
                 };
             }
             Ok(_) => {}
             Err(e) => {
-                return Some(format!("XML parse error in {}: {}", source, e));
+                return Some(crate::XmlIssue {
+                    message: format!("XML parse error in {}: {}", source, e),
+                    code: Some("xml_parse_failure".into()),
+                    params: [
+                        ("path".into(), source.into()),
+                        ("detail".into(), e.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                });
             }
         }
         buf.clear();
@@ -103,11 +147,24 @@ pub(crate) fn check_well_formed(xml: &str, source: &str) -> Option<String> {
 ///
 /// Returns a tuple of (parsed defs, count of abstract defs without a usable defName that were skipped, count of concrete defs without a defName that were dropped, parse errors).
 pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, usize, Vec<String>) {
+    let (defs, skipped, unnamed, errors) = parse_defs_from_xml_structured(xml, source);
+    (
+        defs,
+        skipped,
+        unnamed,
+        errors.into_iter().map(|issue| issue.message).collect(),
+    )
+}
+
+fn parse_defs_from_xml_structured(
+    xml: &str,
+    source: &str,
+) -> (Vec<ParsedDef>, usize, usize, Vec<crate::XmlIssue>) {
     let mut defs = Vec::new();
     let mut abstract_skipped: usize = 0;
     let mut unnamed: usize = 0;
-    let mut errors: Vec<String> = Vec::new();
-    if let Some(msg) = check_well_formed(xml, source) {
+    let mut errors: Vec<crate::XmlIssue> = Vec::new();
+    if let Some(msg) = check_well_formed_structured(xml, source) {
         errors.push(msg);
     }
     let mut reader = Reader::from_str(xml);
@@ -159,7 +216,7 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, u
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!("XML parse error in {}: {}", source, e));
+                errors.push(crate::XmlIssue::parse_error(source, e));
                 break;
             }
             _ => {}
@@ -172,8 +229,8 @@ pub fn parse_defs_from_xml(xml: &str, source: &str) -> (Vec<ParsedDef>, usize, u
     // are byte-identical, so dedup collapses the guaranteed pair. The
     // depth-at-Eof diagnostic stays distinct — no structural site can
     // produce it (it is the absence of an Err).
-    errors.sort();
-    errors.dedup();
+    errors.sort_by(|a, b| a.message.cmp(&b.message));
+    errors.dedup_by(|a, b| a.message == b.message);
 
     (defs, abstract_skipped, unnamed, errors)
 }
@@ -189,7 +246,7 @@ fn parse_single_def(
     root_attributes: &str,
     is_abstract: bool,
     source: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
     unnamed: &mut usize,
 ) -> Option<ParsedDef> {
     let mut def_name: Option<String> = None;
@@ -237,9 +294,13 @@ fn parse_single_def(
                                     Ok(name) => decoded.push_str(&name),
                                     Err(e) => {
                                         poisoned = true;
-                                        errors.push(format!(
-                                            "defName in {} could not be decoded: {}",
-                                            source, e
+                                        errors.push(crate::XmlIssue::new(
+                                            format!(
+                                                "defName in {} could not be decoded: {}",
+                                                source, e
+                                            ),
+                                            "xml_def_name_decode_failure",
+                                            &[("path", source.into()), ("detail", e.to_string())],
                                         ));
                                     }
                                 }
@@ -261,10 +322,15 @@ fn parse_single_def(
                                 // behavior — re-diagnosing here would
                                 // misattribute a second cause.
                                 if !poisoned {
-                                    errors.push(format!(
-                                        "defName in {} closed by unexpected </{}>; def dropped",
-                                        source,
-                                        String::from_utf8_lossy(end.name().as_ref())
+                                    let tag =
+                                        String::from_utf8_lossy(end.name().as_ref()).into_owned();
+                                    errors.push(crate::XmlIssue::new(
+                                        format!(
+                                            "defName in {} closed by unexpected </{}>; def dropped",
+                                            source, tag
+                                        ),
+                                        "xml_def_name_unexpected_close",
+                                        &[("path", source.into()), ("tag", tag)],
                                     ));
                                 }
                                 poisoned = true;
@@ -278,9 +344,10 @@ fn parse_single_def(
                                 // misattributed drop message. Poison and break
                                 // regardless; only the push is guarded.
                                 if !poisoned {
-                                    errors.push(format!(
-                                        "defName in {} is not closed; def dropped",
-                                        source
+                                    errors.push(crate::XmlIssue::new(
+                                        format!("defName in {} is not closed; def dropped", source),
+                                        "xml_def_name_unclosed",
+                                        &[("path", source.into())],
                                     ));
                                 }
                                 poisoned = true;
@@ -293,10 +360,7 @@ fn parse_single_def(
                                 // diagnose at the first violation; then keep
                                 // draining to the close.
                                 if !poisoned {
-                                    errors.push(format!(
-                                        "defName in {} contains nested markup; defName is a leaf: def dropped",
-                                        source
-                                    ));
+                                    errors.push(crate::XmlIssue::new(format!("defName in {} contains nested markup; defName is a leaf: def dropped", source), "xml_def_name_nested", &[("path", source.into())]));
                                 }
                                 poisoned = true;
                             }
@@ -358,7 +422,7 @@ fn parse_single_def(
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!("XML parse error in {}: {}", source, e));
+                errors.push(crate::XmlIssue::parse_error(source, e));
                 break;
             }
             _ => {}
@@ -961,18 +1025,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_defs_dirs_rejects_xml_files_over_reader_limit() {
+    fn parse_defs_dirs_reports_invalid_utf8() {
         let temp = tempfile::tempdir().unwrap();
-        let file = temp.path().join("oversized.xml");
-        std::fs::File::create(&file)
-            .unwrap()
-            .set_len(rcd_core::xml_io::MAX_XML_FILE_BYTES + 1)
-            .unwrap();
+        let file = temp.path().join("invalid.xml");
+        std::fs::write(&file, [0xff]).unwrap();
         let (_, _, _, errors) = parse_defs_dirs(&[temp.path().to_path_buf()]);
         assert!(
-            errors
-                .iter()
-                .any(|error| error.contains("50 MiB size limit")),
+            errors.iter().any(|error| error.contains("invalid.xml")),
             "{errors:?}"
         );
     }

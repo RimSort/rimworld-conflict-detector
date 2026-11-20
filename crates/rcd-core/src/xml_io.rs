@@ -1,28 +1,8 @@
-use std::fs::File;
-use std::io::{self, Read};
+use std::io;
 use std::path::Path;
 
-pub const MAX_XML_FILE_BYTES: u64 = 50 * 1024 * 1024;
-
 pub fn read_xml_file(path: &Path) -> io::Result<String> {
-    let file = File::open(path)?;
-    if file.metadata()?.len() > MAX_XML_FILE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "XML file exceeds the 50 MiB size limit",
-        ));
-    }
-
-    let mut bytes = Vec::new();
-    file.take(MAX_XML_FILE_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_XML_FILE_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "XML file exceeds the 50 MiB size limit",
-        ));
-    }
-
-    String::from_utf8(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+    std::fs::read_to_string(path)
 }
 
 #[cfg(test)]
@@ -31,25 +11,33 @@ mod tests {
     use std::io::ErrorKind;
 
     #[test]
-    fn reads_file_exactly_at_limit() {
+    fn reports_missing_and_invalid_utf8_inputs() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("at-limit.xml");
-        std::fs::write(&path, vec![b'x'; MAX_XML_FILE_BYTES as usize]).unwrap();
-
-        let content = read_xml_file(&path).unwrap();
-
-        assert_eq!(content.len() as u64, MAX_XML_FILE_BYTES);
+        let path = dir.path().join("input.xml");
+        assert_eq!(
+            read_xml_file(&path).unwrap_err().kind(),
+            ErrorKind::NotFound
+        );
+        std::fs::write(&path, [0xff]).unwrap();
+        assert_eq!(
+            read_xml_file(&path).unwrap_err().kind(),
+            ErrorKind::InvalidData
+        );
     }
 
     #[test]
-    fn rejects_file_over_limit_with_invalid_data() {
+    fn reads_xml_larger_than_former_limit() {
+        use std::io::{self, Read, Write};
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("over-limit.xml");
-        std::fs::write(&path, vec![b'x'; MAX_XML_FILE_BYTES as usize + 1]).unwrap();
-
-        let error = read_xml_file(&path).unwrap_err();
-
-        assert_eq!(error.kind(), ErrorKind::InvalidData);
+        let path = dir.path().join("large.xml");
+        let mut file = std::fs::File::create(&path).unwrap();
+        file.write_all(b"<root><!--").unwrap();
+        io::copy(&mut io::repeat(b'x').take(50 * 1024 * 1024 + 1), &mut file).unwrap();
+        file.write_all(b"--></root>").unwrap();
+        drop(file);
+        let xml = read_xml_file(&path).unwrap();
+        assert!(xml.len() > 50 * 1024 * 1024);
+        assert!(xml.ends_with("--></root>"));
     }
 
     #[test]

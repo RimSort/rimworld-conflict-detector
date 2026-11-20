@@ -20,7 +20,7 @@
 
 - [x] **`PatchOperationConditional` not handled** — Falls through to wildcard skip. Should parse the XPath test and execute match/nomatch children similar to `PatchOperationFindMod`.
 
-- [ ] **`PatchOperationSequence` success attribute** — Parsed but the `success` attribute is not read or used. For static analysis the safer direction is to assume all operations execute, but documenting the limitation would help.
+- [x] **`PatchOperationSequence` success attribute** — Static analysis conservatively assumes all contained operations may execute. The README documents that runtime `success` behavior is not evaluated.
 
 - [x] **Shared `is_base_content` classification** — The `ludeon.*` heuristic now marks Core/DLC mods across `--config`, `--dir`, `--mods`, and FFI (`rcd_analyze`) resolution paths.
 
@@ -34,11 +34,11 @@
 
 - [x] **Silent file I/O errors** — `def_parser`, `patch_ops`, `discover_assemblies` all use `.filter_map(|e| e.ok())` on walkdir iterators and `continue` on read failures. Should propagate as diagnostics.
 
-- [ ] **`defName` parser fragility** — Assumes the next event after `<defName>` opening tag is `Event::Text`. Comments or CDATA would cause silent failure. Worse: empty elements (`<defName></defName>`) cause parser desynchronization that swallows all subsequent sibling defs/operations (see review finding above). *(defName leg fixed on `fix/p1-error-propagation`: loop consumes End, CDATA/comments handled, nested markup diagnosed; xpath leg still open — `read_xpath_from_operation` in `patch_ops.rs` retains the one-shot Text-then-discard-End idiom)*
+- [ ] **Investigate XML leaf-text edge cases** — Empty values, comments, and CDATA are handled by the leaf parsers, but source inspection suggests that trimming text events before concatenation may remove whitespace around comments or CDATA. A nested element with the same name as its enclosing leaf may also cause `read_element_text` to return early. Add focused reproductions before determining impact or fixes; these cases have not been verified.
 
-- [ ] **No file size limits** — All file reads are unbounded. Add a reasonable max (e.g., 50MB) as a defensive measure.
+- [ ] **Unbounded input and report memory** — XML and managed DLL reads and generated reports are intentionally uncapped; large inputs or many findings can exhaust memory. Consider a future streaming design without imposing size caps.
 
-- [ ] **No XML recursion depth limit** — `parse_operation`, `parse_sequence`, `parse_find_mod` are mutually recursive. Deeply nested sequences could exhaust the stack (~16k levels needed, unlikely in practice).
+- [x] **Patch-operation recursion limit** — Operations nested beyond 64 levels are diagnosed and skipped iteratively so later siblings can still be analyzed. This limits patch-operation nesting, not general XML depth.
 
 ## Architecture
 
@@ -64,13 +64,13 @@
 
 ### Correctness
 
-- [ ] **XPathOnReplacedDef `break` causes false negatives** — `crates/rcd-xml/src/conflict.rs:128`. Loop over `replacing_mods` breaks after the first match. If 3+ mods define the same def and a 4th patches it, only one conflict is reported instead of all pairs. The `break` is unnecessary (map is already deduplicated) and incorrect. Remove it.
+- [x] **XPathOnReplacedDef reports each replacing mod** — The loop over `replacing_mods` no longer stops after the first match, so each applicable replacement can produce a conflict.
 
-- [ ] **FFI `is_base_content` still not set** — `crates/rcd-ffi/src/lib.rs:54`. The CLI-side fix for this (marked `[x]` above) only covers `resolve.rs`. The FFI calls `parse_about_xml` + `resolve_mod_folders` directly without the `ludeon.*` heuristic. C# consumers always get `is_base_content: false` for Core/DLC mods.
+- [x] **FFI `is_base_content` classification** — `rcd_analyze` calls the shared `mark_base_content` helper before building active-mod metadata; an FFI test checks the Core flag in the report.
 
-- [ ] **Raw XML reconstruction drops root def attributes** — `crates/rcd-xml/src/def_parser.rs` (`parse_single_def`, raw_xml reconstruction). `format!("<{def_type}>{inner_xml}</{def_type}>")` discards `Abstract`, `ParentName`, `Name` attributes from the opening tag. Two defs with identical inner content but different inheritance (e.g., one abstract, one concrete) are incorrectly considered identical, suppressing real replacement conflicts.
+- [x] **Root def attributes in raw XML** — Reconstruction retains root attributes, and replacement comparison includes attribute differences.
 
-- [ ] **Empty `<defName>`/`<xpath>` causes parser desynchronization** — `parse_single_def`'s defName leaf block and `patch_ops.rs` (`read_xpath_from_operation`). For `<defName></defName>`, the first read returns `Event::End` (not Text), then the second read consumes the *next* event — swallowing subsequent sibling defs or patch operations. Extends the "defName parser fragility" item above — the consequence is not just silent failure of one def, but cascading desync that loses all subsequent siblings. *(defName leg fixed on `fix/p1-error-propagation`; xpath leg still open. Gate-review correction: "loses all subsequent siblings" was overstated — damage was in-def only, the outer loop resyncs at the next def `Start`)*
+- [x] **Empty `<defName>`/`<xpath>` parser desynchronization** — The leaf readers consume their closing elements without the old one-shot Text-then-End read. Empty values, comments, CDATA, and following siblings have focused tests; additional possible edge cases are tracked under Robustness.
 
 ### Error Handling
 
@@ -102,9 +102,9 @@
 
 Items surfaced by the final cross-commit review and its gate reviews, deliberately not fixed in `fix/p1-error-propagation` to keep the branch review-sized:
 
-- [ ] **`patch_ops.rs` nested one-shot reads** — `read_xpath_from_operation`/`read_li_text_list` keep the Text-then-discard-End idiom the defName loop fixed; same desync/silent-drop class, in-def damage only.
-- [ ] **`replacement.rs` undecodable-text silent drops** — `normalize_whitespace` and `extract_tag_content`'s text arm discard `unescape()` errors; field content can vanish from the diff silently (pre-existing pattern).
-- [ ] **Comment/PI not re-emitted into `raw_xml`** — def_parser skips them from the reconstruction (matches pre-existing outer-loop behavior; only affects byte-fidelity of raw_xml, not identity).
+- [x] **`patch_ops.rs` nested one-shot reads** — XPath and list leaves now use `read_element_text` instead of the Text-then-discard-End idiom. Possible remaining edge cases are tracked under Robustness.
+- [x] **`replacement.rs` undecodable-text handling** — Normalization and field extraction diagnose text-decode failures; invalid input is retained as a marker rather than silently dropped or treated as equivalent.
+- [ ] **Comments/PIs not re-emitted into `raw_xml`** — The def parser omits them during reconstruction. Investigate the effect on text boundaries and comparison semantics rather than assuming the difference only affects byte fidelity.
 - [ ] **T1 manual-scan Err-arm test seam** — the `catch_unwind` Err→Warning arm in HarmonyDetector is verified by inspection only; a crash fixture was declined as YAGNI.
 - [x] **`list-mods --format json` diagnostics envelope** — JSON output includes both discovered mods and resolution diagnostics, including total failure.
 - [x] **Concrete-def-no-defName diagnostic may need a config-file escape hatch** — resolved by aggregation: a corpus run over 1573 workshop mods showed the per-def Warning firing on vanilla Core/Royalty SongDefs (legitimate — RimWorld auto-names defName-less defs at runtime). Nameless concrete defs now aggregate into one Info diagnostic per mod, matching the abstract-skip convention; no escape hatch needed.
@@ -117,7 +117,7 @@ Items surfaced by the final cross-commit review and its gate reviews, deliberate
 
 - [x] **`LoadFolders.xml` conditional evaluation** — Parse supported active/inactive condition attributes and evaluate them against active mod identities for folder resolution. Unknown condition attributes are surfaced as informational diagnostics.
 
-- [ ] **Field-level XML tree diffing** — Current replacement detection does whole-def comparison. A more sophisticated implementation would diff individual child elements and report specific divergent fields more accurately.
+- [ ] **Field-level XML tree diffing** — Replacement detection already reports differing root attributes and uses a heuristic for top-level child tags. A more sophisticated tree diff could report nested differences more precisely.
 
 - [ ] **Def inheritance conflicts (v2)** — Mods overriding or extending abstract base defs via `ParentName`. Requires building the def inheritance tree.
 

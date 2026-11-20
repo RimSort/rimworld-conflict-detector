@@ -31,6 +31,18 @@ pub fn resolve_from_dir(dir: &Path, game_version: Option<&str>) -> ResolvedMods 
                     format!("Mod directory does not exist: {}", dir.display())
                 },
                 source: DiagnosticSource::MetadataResolution,
+                analysis_incomplete: true,
+                code: Some(
+                    if dir.exists() {
+                        "mod_directory_not_directory"
+                    } else {
+                        "mod_directory_missing"
+                    }
+                    .into(),
+                ),
+                params: [("path".into(), dir.display().to_string())]
+                    .into_iter()
+                    .collect(),
             }],
         };
     }
@@ -109,6 +121,14 @@ pub fn resolve_from_config(
                     severity: Severity::Error,
                     message: format!("Failed to parse ModsConfig.xml: {}", e),
                     source: DiagnosticSource::ModsConfig,
+                    analysis_incomplete: true,
+                    code: Some("mods_config_parse_failure".into()),
+                    params: [
+                        ("path".into(), config_path.display().to_string()),
+                        ("detail".into(), e.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
                 }],
             };
         }
@@ -149,6 +169,9 @@ pub fn resolve_from_config(
                     package_id
                 ),
                 source: DiagnosticSource::MetadataResolution,
+                analysis_incomplete: true,
+                code: Some("active_mod_not_found".into()),
+                params: [("package_id".into(), package_id.clone())].into_iter().collect(),
             }),
         }
     }
@@ -328,6 +351,14 @@ mod tests {
         let resolved = resolve_from_dir(&missing, None);
         assert!(resolved.mods.is_empty());
         assert_eq!(resolved.diagnostics.len(), 1);
+        assert_eq!(
+            resolved.diagnostics[0].code.as_deref(),
+            Some("mod_directory_missing")
+        );
+        assert_eq!(
+            resolved.diagnostics[0].params["path"],
+            missing.display().to_string()
+        );
         assert_eq!(resolved.diagnostics[0].severity, Severity::Error);
         assert_eq!(
             resolved.diagnostics[0].source,
@@ -357,6 +388,14 @@ mod tests {
         let resolved = resolve_from_dir(&file, None);
         assert!(resolved.mods.is_empty());
         assert_eq!(resolved.diagnostics.len(), 1);
+        assert_eq!(
+            resolved.diagnostics[0].code.as_deref(),
+            Some("mod_directory_not_directory")
+        );
+        assert_eq!(
+            resolved.diagnostics[0].params["path"],
+            file.display().to_string()
+        );
         assert_eq!(resolved.diagnostics[0].severity, Severity::Error);
         assert!(
             resolved.diagnostics[0]
@@ -407,6 +446,11 @@ mod tests {
             resolved.diagnostics[1].source,
             rcd_core::DiagnosticSource::MetadataResolution
         );
+        assert_eq!(
+            resolved.diagnostics[1].code.as_deref(),
+            Some("active_mod_not_found")
+        );
+        assert_eq!(resolved.diagnostics[1].params["package_id"], "brokenmod");
         assert_eq!(
             resolved.diagnostics[1].affected_mod.as_deref(),
             Some("brokenmod")

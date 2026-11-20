@@ -98,9 +98,19 @@ impl LoadFolders {
             Ok(folders) => folders.select(requested_version, active_mods),
             Err(error) => FolderSelection {
                 entries: None,
-                diagnostic: Some(folder_warning(format!(
-                    "Failed to parse LoadFolders.xml; using implicit folder resolution: {error}"
-                ))),
+                diagnostic: Some(folder_warning(
+                    format!(
+                        "Failed to parse LoadFolders.xml; using implicit folder resolution: {error}"
+                    ),
+                    true,
+                    "load_folders_parse_failure",
+                    [
+                        ("path".into(), path.display().to_string()),
+                        ("detail".into(), error.to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                )),
             },
         }
     }
@@ -365,13 +375,18 @@ fn select_folders(
             entries: None,
             diagnostic: Some(folder_warning(
                 "No applicable LoadFolders.xml version entry; using implicit folder resolution",
+                true,
+                "load_folders_no_applicable_version",
+                Default::default(),
             )),
         };
     };
     let mut diagnostics = Vec::new();
+    let mut invalid_paths = Vec::new();
     let mut selected = Vec::new();
     for entry in entries {
         if validate_folder_path(&entry.path).is_err() {
+            invalid_paths.push(format!("{:?}", entry.path));
             diagnostics.push(format!(
                 "Invalid LoadFolders.xml folder path {:?}; skipping entry",
                 entry.path
@@ -388,23 +403,55 @@ fn select_folders(
             message.push_str("; ");
             message.push_str(detail);
         }
-        Some(folder_warning(message))
+        let code = if diagnostics.is_empty() {
+            "load_folders_empty"
+        } else {
+            "load_folders_empty_invalid_paths"
+        };
+        let params = if invalid_paths.is_empty() {
+            Default::default()
+        } else {
+            [("paths".into(), invalid_paths.join(", "))]
+                .into_iter()
+                .collect()
+        };
+        Some(folder_warning(
+            message,
+            !diagnostics.is_empty(),
+            code,
+            params,
+        ))
     } else if diagnostics.is_empty() {
         None
     } else {
-        Some(folder_warning(diagnostics.join("; ")))
+        Some(folder_warning(
+            diagnostics.join("; "),
+            true,
+            "load_folders_invalid_paths",
+            [("paths".into(), invalid_paths.join(", "))]
+                .into_iter()
+                .collect(),
+        ))
     };
     FolderSelection {
         entries: Some(selected),
         diagnostic,
     }
 }
-fn folder_warning(message: impl Into<String>) -> Diagnostic {
+fn folder_warning(
+    message: impl Into<String>,
+    analysis_incomplete: bool,
+    code: &str,
+    params: std::collections::BTreeMap<String, String>,
+) -> Diagnostic {
     Diagnostic {
         affected_mod: None,
         severity: Severity::Warning,
         message: message.into(),
         source: DiagnosticSource::FolderResolution,
+        analysis_incomplete,
+        code: Some(code.into()),
+        params,
     }
 }
 fn validate_folder_path(text: &str) -> Result<PathBuf, ()> {
@@ -583,7 +630,15 @@ mod tests {
         .unwrap();
         let selection = parsed.select(Some("1.5"), &[]);
         assert_eq!(selection.entries, Some(vec![]));
-        let message = selection.diagnostic.unwrap().message;
+        let diagnostic = selection.diagnostic.unwrap();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("load_folders_empty_invalid_paths")
+        );
+        assert!(diagnostic.params["paths"].contains("../escape"));
+        assert!(diagnostic.params["paths"].contains("/abs"));
+        assert!(diagnostic.analysis_incomplete);
+        let message = diagnostic.message;
         assert!(
             message.contains("LoadFolders.xml selected no folders"),
             "empty-selection status must survive: {message}"
@@ -612,7 +667,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Good"]
         );
-        let message = selection.diagnostic.unwrap().message;
+        let diagnostic = selection.diagnostic.unwrap();
+        assert_eq!(
+            diagnostic.code.as_deref(),
+            Some("load_folders_invalid_paths")
+        );
+        assert!(diagnostic.params["paths"].contains("../escape"));
+        let message = diagnostic.message;
         assert!(
             message.contains("../escape") && message.contains("/abs"),
             "every rejected path must be named: {message}"
@@ -629,10 +690,10 @@ mod tests {
         .unwrap();
         let selection = parsed.select(Some("1.5"), &[]);
         assert_eq!(selection.entries, Some(vec![]));
-        assert_eq!(
-            selection.diagnostic.unwrap().message,
-            "LoadFolders.xml selected no folders"
-        );
+        let diagnostic = selection.diagnostic.unwrap();
+        assert_eq!(diagnostic.code.as_deref(), Some("load_folders_empty"));
+        assert!(!diagnostic.analysis_incomplete);
+        assert_eq!(diagnostic.message, "LoadFolders.xml selected no folders");
     }
 
     #[test]
@@ -706,14 +767,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_file_uses_shared_size_limit() {
+    fn parse_file_reports_missing_input() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("LoadFolders.xml");
-        std::fs::write(
-            &path,
-            vec![b'x'; crate::xml_io::MAX_XML_FILE_BYTES as usize + 1],
-        )
-        .unwrap();
         assert!(LoadFolders::parse_file(&path).is_err());
+        let result = LoadFolders::resolve_file(&path, None, &[]);
+        assert!(result.diagnostic.unwrap().analysis_incomplete);
     }
 }

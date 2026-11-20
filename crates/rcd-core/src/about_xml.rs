@@ -145,11 +145,15 @@ fn parse_about_xml_str(xml: &str, mod_root: &Path) -> Result<Mod, AboutXmlError>
     reader.config_mut().trim_text(true);
     let mut buf = Vec::new();
     let mut current_element: Option<String> = None;
-    let mut depth = 0;
+    let mut root_name = String::new();
+    let mut depth: usize = 0;
 
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => {
+                if depth == 0 {
+                    root_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                }
                 depth += 1;
                 if depth == 2 {
                     // Direct child of ModMetaData
@@ -187,6 +191,12 @@ fn parse_about_xml_str(xml: &str, mod_root: &Path) -> Result<Mod, AboutXmlError>
         buf.clear();
     }
 
+    if depth != 0 {
+        return Err(AboutXmlError::Xml(quick_xml::Error::IllFormed(
+            quick_xml::errors::IllFormedError::MissingEndTag(root_name),
+        )));
+    }
+
     // Validate required fields
     let package_id = package_id.ok_or_else(|| AboutXmlError::MissingField("packageId".into()))?;
     let name = name.unwrap_or_else(|| package_id.clone());
@@ -214,6 +224,30 @@ fn parse_about_xml_str(xml: &str, mod_root: &Path) -> Result<Mod, AboutXmlError>
 mod tests {
     use super::*;
     use crate::testutil::fixtures_path;
+
+    #[test]
+    fn unclosed_about_root_is_rejected() {
+        let xml = "<DifferentRoot><packageId>example.mod</packageId>";
+        let result = parse_about_xml_str(xml, Path::new("/mod"));
+        assert!(matches!(
+            result,
+            Err(AboutXmlError::Xml(quick_xml::Error::IllFormed(
+                quick_xml::errors::IllFormedError::MissingEndTag(name)
+            ))) if name == "DifferentRoot"
+        ));
+    }
+
+    #[test]
+    fn unclosed_about_nested_metadata_is_rejected() {
+        let xml = "<ModMetaData><packageId>example.mod</packageId><loadAfter><li>other</li>";
+        let result = parse_about_xml_str(xml, Path::new("/mod"));
+        assert!(matches!(
+            result,
+            Err(AboutXmlError::Xml(quick_xml::Error::IllFormed(
+                quick_xml::errors::IllFormedError::MissingEndTag(name)
+            ))) if name == "ModMetaData"
+        ));
+    }
 
     #[test]
     fn parse_about_xml_basic() {

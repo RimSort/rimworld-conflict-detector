@@ -29,8 +29,8 @@ pub struct ManualPatchHint {
 /// Scan a DLL's method bodies for string literals that look like they could be
 /// type or method names passed to `AccessTools.Method()` or similar APIs.
 ///
-/// Returns an empty vec if:
-/// - The DLL can't be read or parsed
+/// Returns an I/O error if the DLL can't be read. Returns an empty vec if:
+/// - The DLL can't be parsed
 /// - No method bodies contain string-loading instructions
 /// - The IL instruction API doesn't expose string operands in a usable way
 ///
@@ -41,21 +41,18 @@ pub struct ManualPatchHint {
 /// - It is between 2 and 80 characters long
 /// - It contains no spaces or newlines
 /// - It doesn't look like a path, URL, or sentence
-pub fn detect_manual_patches(dll_path: &Path) -> Vec<ManualPatchHint> {
+pub fn detect_manual_patches(dll_path: &Path) -> std::io::Result<Vec<ManualPatchHint>> {
     let dll_name = dll_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("unknown.dll")
         .to_string();
 
-    let bytes = match std::fs::read(dll_path) {
-        Ok(b) => b,
-        Err(_) => return Vec::new(),
-    };
+    let bytes = std::fs::read(dll_path)?;
 
     let res = match Resolution::parse(&bytes, ReadOptions::default()) {
         Ok(r) => r,
-        Err(_) => return Vec::new(),
+        Err(_) => return Ok(Vec::new()),
     };
 
     let mut hints = Vec::new();
@@ -83,7 +80,7 @@ pub fn detect_manual_patches(dll_path: &Path) -> Vec<ManualPatchHint> {
         }
     }
 
-    hints
+    Ok(hints)
 }
 
 /// Heuristic: does this string look like it could be a .NET method name?
@@ -161,7 +158,7 @@ mod tests {
     #[test]
     fn detect_manual_patches_does_not_crash_on_valid_dll() {
         // The main requirement: this should not panic or crash
-        let hints = detect_manual_patches(&test_dll_path());
+        let hints = detect_manual_patches(&test_dll_path()).unwrap();
         // We don't assert specific results since the test DLL may or may not
         // contain strings that pass the heuristic. Just verify it runs.
         println!("Manual patch hints found: {}", hints.len());
@@ -174,9 +171,9 @@ mod tests {
     }
 
     #[test]
-    fn detect_manual_patches_returns_empty_for_nonexistent_dll() {
-        let hints = detect_manual_patches(Path::new("/nonexistent/path/test.dll"));
-        assert!(hints.is_empty());
+    fn detect_manual_patches_returns_io_error_for_nonexistent_dll() {
+        let error = detect_manual_patches(Path::new("/nonexistent/path/test.dll")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     }
 
     #[test]

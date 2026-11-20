@@ -70,11 +70,50 @@ pub unsafe extern "C" fn rcd_analyze(
                 severity: rcd_core::Severity::Warning,
                 message: format!("Unknown config fields ignored: {keys}"),
                 source: rcd_core::DiagnosticSource::MetadataResolution,
+                analysis_incomplete: true,
+                code: Some("unknown_config_fields".into()),
+                params: [("fields".into(), keys)].into_iter().collect(),
             });
         }
+        if let Some(version) = game_version.filter(|v| !v.is_empty())
+            && rcd_core::load_folders::normalize_game_version(version).is_none()
+        {
+            pre_diagnostics.push(rcd_core::Diagnostic {
+                affected_mod: None,
+                severity: rcd_core::Severity::Warning,
+                message: format!(
+                    "Invalid game version {version:?}; falling back to default folder selection"
+                ),
+                source: rcd_core::DiagnosticSource::FolderResolution,
+                analysis_incomplete: true,
+                code: Some("invalid_game_version".into()),
+                params: [
+                    ("version".into(), version.to_owned()),
+                    ("version_debug".into(), format!("{version:?}")),
+                ]
+                .into_iter()
+                .collect(),
+            });
+        }
+        let mut package_paths: BTreeMap<String, std::path::PathBuf> = BTreeMap::new();
+        let mut duplicate = None;
         for path in &config.mod_paths {
             match rcd_core::about_xml::parse_about_xml(path) {
-                Ok(m) => mods.push(m),
+                Ok(m) => {
+                    if let Some(first) = package_paths.get(&m.package_id) {
+                        if duplicate.is_none() {
+                            duplicate = Some(format!(
+                                "Duplicate package ID {}: {} and {}",
+                                m.package_id,
+                                std::path::Path::display(first),
+                                path.display()
+                            ));
+                        }
+                    } else {
+                        package_paths.insert(m.package_id.clone(), path.clone());
+                    }
+                    mods.push(m);
+                }
                 Err(e) => pre_diagnostics.push(rcd_core::diagnostic::about_parse_failure(
                     path,
                     &e,
@@ -82,6 +121,13 @@ pub unsafe extern "C" fn rcd_analyze(
                     rcd_core::DiagnosticSource::MetadataResolution,
                 )),
             }
+        }
+        if let Some(error) = duplicate {
+            let json =
+                serde_json::json!({"error": error, "diagnostics": pre_diagnostics}).to_string();
+            return CString::new(json)
+                .expect("JSON cannot contain a raw NUL")
+                .into_raw();
         }
         rcd_core::content_files::mark_base_content(&mut mods);
         let active_mods = mods
@@ -171,6 +217,117 @@ mod tests {
     use std::ffi::{CStr, CString};
 
     #[test]
+    fn duplicate_parsed_package_ids_are_rejected() {
+        let root = TempDir::new();
+        let first = make_mod(&root.path().join("first"), "Example.Mod", "One", None);
+        let second = make_mod(&root.path().join("second"), "example.mod", "Two", None);
+        let reply =
+            analyze_json(serde_json::json!({"mod_paths": [first, second], "ordered": true}));
+        assert!(reply["error"].as_str().unwrap().contains("example.mod"));
+        assert!(reply.get("conflicts").is_none());
+    }
+
+    #[test]
+    fn duplicate_and_unreadable_metadata_preserve_paths_and_diagnostics() {
+        let root = TempDir::new();
+        let first = make_mod(&root.path().join("a"), "Example.Mod", "One", None);
+        let second = make_mod(&root.path().join("b"), "example.mod", "Two", None);
+        let missing = root.path().join("missing");
+        let reply = analyze_json(serde_json::json!({"mod_paths": [&first, &second, &missing]}));
+        let error = reply["error"].as_str().unwrap();
+        assert!(error.contains(&first.display().to_string()));
+        assert!(error.contains(&second.display().to_string()));
+        let diagnostics = reply["diagnostics"].as_array().unwrap();
+        assert!(diagnostics.iter().any(|d| {
+            d["analysis_incomplete"] == true
+                && d["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&missing.display().to_string())
+        }));
+    }
+
+    #[test]
+    fn invalid_game_version_warns_and_preserves_context() {
+        let root = TempDir::new();
+        let selected = make_mod(
+            root.path(),
+            "selected.mod",
+            "Selected",
+            Some(
+                "<loadFolders><v1.5><li>Version</li></v1.5><default><li>Fallback</li></default></loadFolders>",
+            ),
+        );
+        let comparison = make_mod(root.path(), "comparison.mod", "Comparison", None);
+        for (path, contents) in [
+            (
+                selected.join("Fallback/Defs"),
+                "<Defs><ThingDef><defName>FallbackThing</defName><label>fallback</label></ThingDef></Defs>",
+            ),
+            (
+                selected.join("Version/Defs"),
+                "<Defs><ThingDef><defName>VersionThing</defName><label>version</label></ThingDef></Defs>",
+            ),
+            (
+                comparison.join("Defs"),
+                "<Defs><ThingDef><defName>FallbackThing</defName><label>comparison</label></ThingDef><ThingDef><defName>VersionThing</defName><label>comparison</label></ThingDef></Defs>",
+            ),
+        ] {
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::write(path.join("defs.xml"), contents).unwrap();
+        }
+
+        for (version, expected_target, should_warn) in [
+            (None, "FallbackThing", false),
+            (Some(""), "FallbackThing", false),
+            (Some("not-a-version"), "FallbackThing", true),
+            (Some("   "), "FallbackThing", true),
+            (Some("1.5"), "VersionThing", false),
+        ] {
+            let mut config = serde_json::json!({"mod_paths": [&selected, &comparison]});
+            if let Some(version) = version {
+                config["game_version"] = version.into();
+            }
+            let report = analyze_json(config);
+            assert_eq!(report["metadata"]["game_version"].as_str(), version);
+            let conflicts = report["conflicts"].as_array().unwrap();
+            assert_eq!(conflicts.len(), 1, "{version:?}: {report}");
+            assert_eq!(
+                conflicts[0]["target"]["def_name"], expected_target,
+                "{version:?}: {report}"
+            );
+            let warnings: Vec<_> = report["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|d| {
+                    d["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Invalid game version ")
+                })
+                .collect();
+            assert_eq!(
+                warnings.len(),
+                usize::from(should_warn),
+                "{version:?}: {report}"
+            );
+            if should_warn {
+                assert_eq!(warnings[0]["code"], "invalid_game_version");
+                assert_eq!(warnings[0]["params"]["version"], version.unwrap());
+                assert_eq!(warnings[0]["severity"], "warning");
+                assert_eq!(warnings[0]["analysis_incomplete"], true);
+                assert!(
+                    warnings[0]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains(version.unwrap())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn null_config_returns_error() {
         let result = unsafe { rcd_analyze(std::ptr::null(), None) };
         assert!(!result.is_null());
@@ -199,7 +356,7 @@ mod tests {
 
         // Should parse as valid JSON
         let parsed: serde_json::Value = serde_json::from_str(&result_str).unwrap();
-        assert_eq!(parsed["schema_version"], 2);
+        assert_eq!(parsed["schema_version"], 3);
     }
 
     #[test]
@@ -267,6 +424,33 @@ mod tests {
             std::fs::write(path.join("LoadFolders.xml"), folders).unwrap();
         }
         path
+    }
+
+    #[test]
+    fn ffi_serializes_conflict_severity_and_diagnostic_impact() {
+        let root = TempDir::new();
+        let first = make_mod(root.path(), "a", "A", None);
+        let second = make_mod(root.path(), "b", "B", None);
+        for (path, label) in [(&first, "A"), (&second, "B")] {
+            std::fs::create_dir_all(path.join("Defs")).unwrap();
+            std::fs::write(path.join("Defs/shared.xml"), format!("<Defs><ThingDef><defName>Steel</defName><label>{label}</label></ThingDef><SongDef><label>unnamed</label></SongDef></Defs>")).unwrap();
+        }
+        let report = analyze_json(serde_json::json!({"mod_paths": [first, second]}));
+        assert_eq!(report["schema_version"], 3);
+        assert!(
+            report["conflicts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c["type"] == "def" && c["severity"] == "error")
+        );
+        assert!(
+            report["diagnostics"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|d| d["severity"] == "info" && d["analysis_incomplete"] == true)
+        );
     }
 
     #[test]
@@ -409,6 +593,7 @@ mod tests {
             .expect("report must have diagnostics");
         assert!(
             diagnostics.iter().any(|d| d["severity"] == "error"
+                && d["analysis_incomplete"] == true
                 && d["message"]
                     .as_str()
                     .is_some_and(|m| m.contains("Failed to parse mod"))),

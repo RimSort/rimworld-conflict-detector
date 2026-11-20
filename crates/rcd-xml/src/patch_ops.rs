@@ -8,11 +8,11 @@
 
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use rcd_core::content_files::collect_files_with_precedence;
+use rcd_core::content_files::collect_files_with_precedence_structured;
 use rcd_core::xml_io::read_xml_file;
 use std::path::{Path, PathBuf};
 
-use crate::def_parser::check_well_formed;
+use crate::def_parser::check_well_formed_structured;
 
 const MAX_OPERATION_DEPTH: usize = 64;
 
@@ -45,7 +45,15 @@ pub fn parse_patches_dir(dir: &Path) -> (Vec<ParsedPatchOp>, Vec<String>) {
 /// Parse XML patch files from high-priority-first directories. The first
 /// directory wins for each case-sensitive relative path.
 pub fn parse_patches_dirs(dirs: &[PathBuf]) -> (Vec<ParsedPatchOp>, Vec<String>) {
-    let (files, mut errors) = collect_files_with_precedence(dirs);
+    let (ops, errors) = parse_patches_dirs_structured(dirs);
+    (ops, errors.into_iter().map(|issue| issue.message).collect())
+}
+
+pub(crate) fn parse_patches_dirs_structured(
+    dirs: &[PathBuf],
+) -> (Vec<ParsedPatchOp>, Vec<crate::XmlIssue>) {
+    let (files, enumeration_errors) = collect_files_with_precedence_structured(dirs);
+    let mut errors: Vec<crate::XmlIssue> = enumeration_errors.into_iter().map(Into::into).collect();
     let mut ops = Vec::new();
     for path in files {
         if !path
@@ -57,11 +65,20 @@ pub fn parse_patches_dirs(dirs: &[PathBuf]) -> (Vec<ParsedPatchOp>, Vec<String>)
         match read_xml_file(&path) {
             Ok(contents) => {
                 let source = path.to_string_lossy().to_string();
-                let (parsed, xml_errors) = parse_patches_from_xml(&contents, &source);
+                let (parsed, xml_errors) = parse_patches_from_xml_structured(&contents, &source);
                 ops.extend(parsed);
                 errors.extend(xml_errors);
             }
-            Err(error) => errors.push(format!("Failed to read {}: {}", path.display(), error)),
+            Err(error) => errors.push(crate::XmlIssue {
+                message: format!("Failed to read {}: {}", path.display(), error),
+                code: Some("xml_read_failure".into()),
+                params: [
+                    ("path".into(), path.display().to_string()),
+                    ("detail".into(), error.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            }),
         }
     }
     (ops, errors)
@@ -71,9 +88,17 @@ pub fn parse_patches_dirs(dirs: &[PathBuf]) -> (Vec<ParsedPatchOp>, Vec<String>)
 ///
 /// Handles top-level `<Patch>` containing `<Operation Class="...">` elements.
 pub fn parse_patches_from_xml(xml: &str, source: &str) -> (Vec<ParsedPatchOp>, Vec<String>) {
+    let (ops, errors) = parse_patches_from_xml_structured(xml, source);
+    (ops, errors.into_iter().map(|issue| issue.message).collect())
+}
+
+fn parse_patches_from_xml_structured(
+    xml: &str,
+    source: &str,
+) -> (Vec<ParsedPatchOp>, Vec<crate::XmlIssue>) {
     let mut ops = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-    if let Some(msg) = check_well_formed(xml, source) {
+    let mut errors: Vec<crate::XmlIssue> = Vec::new();
+    if let Some(msg) = check_well_formed_structured(xml, source) {
         errors.push(msg);
     }
     let mut reader = Reader::from_str(xml);
@@ -118,7 +143,7 @@ pub fn parse_patches_from_xml(xml: &str, source: &str) -> (Vec<ParsedPatchOp>, V
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!("XML parse error in {}: {}", source, e));
+                errors.push(crate::XmlIssue::parse_error(source, e));
                 break;
             }
             _ => {}
@@ -128,8 +153,8 @@ pub fn parse_patches_from_xml(xml: &str, source: &str) -> (Vec<ParsedPatchOp>, V
 
     // FR-7a M-2: pre-check and structural capture report the same root error
     // byte-identically; dedup collapses the guaranteed pair. See def_parser.
-    errors.sort();
-    errors.dedup();
+    errors.sort_by(|a, b| a.message.cmp(&b.message));
+    errors.dedup_by(|a, b| a.message == b.message);
 
     (ops, errors)
 }
@@ -143,12 +168,10 @@ fn parse_operation(
     condition: Option<PatchCondition>,
     operation_depth: usize,
     ops: &mut Vec<ParsedPatchOp>,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) {
     if operation_depth > MAX_OPERATION_DEPTH {
-        errors.push(format!(
-            "Patch operation nesting exceeds maximum depth {MAX_OPERATION_DEPTH} in {source}; skipping operation"
-        ));
+        errors.push(crate::XmlIssue::new(format!("Patch operation nesting exceeds maximum depth {MAX_OPERATION_DEPTH} in {source}; skipping operation"), "xml_patch_depth_exceeded", &[("path", source.into()), ("depth", MAX_OPERATION_DEPTH.to_string())]));
         skip_current_element_by_depth(reader, source, errors);
         return;
     }
@@ -198,7 +221,7 @@ fn parse_operation(
 fn read_xpath_from_operation(
     reader: &mut Reader<&[u8]>,
     source: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) -> Option<String> {
     let mut xpath: Option<String> = None;
     let mut depth: u32 = 1; // We're inside the Operation/match element
@@ -229,7 +252,7 @@ fn read_xpath_from_operation(
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!("XML parse error in {}: {}", source, e));
+                errors.push(crate::XmlIssue::parse_error(source, e));
                 break;
             }
             _ => {}
@@ -248,7 +271,7 @@ fn parse_sequence(
     condition: Option<PatchCondition>,
     operation_depth: usize,
     ops: &mut Vec<ParsedPatchOp>,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) {
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
@@ -284,7 +307,7 @@ fn parse_sequence(
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!("XML parse error in {}: {}", source, e));
+                errors.push(crate::XmlIssue::parse_error(source, e));
                 break;
             }
             _ => {}
@@ -300,7 +323,7 @@ fn parse_find_mod(
     source: &str,
     operation_depth: usize,
     ops: &mut Vec<ParsedPatchOp>,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) {
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
@@ -344,7 +367,7 @@ fn parse_find_mod(
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!("XML parse error in {}: {}", source, e));
+                errors.push(crate::XmlIssue::parse_error(source, e));
                 break;
             }
             _ => {}
@@ -362,7 +385,7 @@ fn parse_conditional(
     condition: Option<PatchCondition>,
     operation_depth: usize,
     ops: &mut Vec<ParsedPatchOp>,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) {
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
@@ -400,7 +423,7 @@ fn parse_conditional(
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!("XML parse error in {}: {}", source, e));
+                errors.push(crate::XmlIssue::parse_error(source, e));
                 break;
             }
             _ => {}
@@ -414,7 +437,7 @@ fn parse_conditional(
 fn read_li_text_list(
     reader: &mut Reader<&[u8]>,
     source: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) -> Vec<String> {
     let mut items = Vec::new();
     let mut depth: u32 = 1;
@@ -443,7 +466,7 @@ fn read_li_text_list(
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!("XML parse error in {}: {}", source, e));
+                errors.push(crate::XmlIssue::parse_error(source, e));
                 break;
             }
             _ => {}
@@ -462,7 +485,7 @@ fn read_element_text(
     reader: &mut Reader<&[u8]>,
     element: &str,
     source: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) -> Option<String> {
     let mut text = String::new();
     let mut nested: Vec<String> = Vec::new();
@@ -474,7 +497,15 @@ fn read_element_text(
                 Ok(value) => text.push_str(&value),
                 Err(error) => {
                     if !malformed {
-                        errors.push(format!("Malformed <{element}> text in {source}: {error}"));
+                        errors.push(crate::XmlIssue::new(
+                            format!("Malformed <{element}> text in {source}: {error}"),
+                            "xml_text_decode_failure",
+                            &[
+                                ("path", source.into()),
+                                ("element", element.into()),
+                                ("detail", error.to_string()),
+                            ],
+                        ));
                     }
                     malformed = true;
                 }
@@ -483,21 +514,37 @@ fn read_element_text(
                 Ok(value) => text.push_str(&value),
                 Err(error) => {
                     if !malformed {
-                        errors.push(format!("Malformed <{element}> text in {source}: {error}"));
+                        errors.push(crate::XmlIssue::new(
+                            format!("Malformed <{element}> text in {source}: {error}"),
+                            "xml_text_decode_failure",
+                            &[
+                                ("path", source.into()),
+                                ("element", element.into()),
+                                ("detail", error.to_string()),
+                            ],
+                        ));
                     }
                     malformed = true;
                 }
             },
             Ok(Event::Start(value)) => {
                 if !malformed {
-                    errors.push(format!("Nested element in <{element}> text in {source}"));
+                    errors.push(crate::XmlIssue::new(
+                        format!("Nested element in <{element}> text in {source}"),
+                        "xml_text_nested",
+                        &[("path", source.into()), ("element", element.into())],
+                    ));
                 }
                 malformed = true;
                 nested.push(String::from_utf8_lossy(value.name().as_ref()).into_owned());
             }
             Ok(Event::Empty(_)) => {
                 if !malformed {
-                    errors.push(format!("Nested element in <{element}> text in {source}"));
+                    errors.push(crate::XmlIssue::new(
+                        format!("Nested element in <{element}> text in {source}"),
+                        "xml_text_nested",
+                        &[("path", source.into()), ("element", element.into())],
+                    ));
                 }
                 malformed = true;
             }
@@ -505,8 +552,10 @@ fn read_element_text(
                 let name = String::from_utf8_lossy(value.name().as_ref()).into_owned();
                 if name == element {
                     if !nested.is_empty() && !malformed {
-                        errors.push(format!(
-                            "Mismatched element in <{element}> text in {source}"
+                        errors.push(crate::XmlIssue::new(
+                            format!("Mismatched element in <{element}> text in {source}"),
+                            "xml_text_mismatched",
+                            &[("path", source.into()), ("element", element.into())],
                         ));
                         malformed = true;
                     }
@@ -514,26 +563,34 @@ fn read_element_text(
                 }
                 if let Some(expected) = nested.pop() {
                     if name != expected && !malformed {
-                        errors.push(format!(
-                            "Mismatched element in <{element}> text in {source}"
+                        errors.push(crate::XmlIssue::new(
+                            format!("Mismatched element in <{element}> text in {source}"),
+                            "xml_text_mismatched",
+                            &[("path", source.into()), ("element", element.into())],
                         ));
                         malformed = true;
                     }
                 } else {
                     if !malformed {
-                        errors.push(format!(
-                            "Mismatched end element in <{element}> text in {source}"
+                        errors.push(crate::XmlIssue::new(
+                            format!("Mismatched end element in <{element}> text in {source}"),
+                            "xml_text_mismatched_end",
+                            &[("path", source.into()), ("element", element.into())],
                         ));
                     }
                     return None;
                 }
             }
             Ok(Event::Eof) => {
-                errors.push(format!("Unexpected EOF in <{element}> text in {source}"));
+                errors.push(crate::XmlIssue::new(
+                    format!("Unexpected EOF in <{element}> text in {source}"),
+                    "xml_text_unexpected_eof",
+                    &[("path", source.into()), ("element", element.into())],
+                ));
                 return None;
             }
             Err(error) => {
-                errors.push(format!("XML parse error in {source}: {error}"));
+                errors.push(crate::XmlIssue::parse_error(source, error));
                 return None;
             }
             _ => {}
@@ -557,7 +614,7 @@ fn extract_class_attr(e: &quick_xml::events::BytesStart<'_>) -> Option<String> {
 fn skip_current_element_by_depth(
     reader: &mut Reader<&[u8]>,
     source: &str,
-    errors: &mut Vec<String>,
+    errors: &mut Vec<crate::XmlIssue>,
 ) {
     let mut depth: u32 = 1;
     let mut buf = Vec::new();
@@ -573,7 +630,7 @@ fn skip_current_element_by_depth(
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                errors.push(format!("XML parse error in {}: {}", source, e));
+                errors.push(crate::XmlIssue::parse_error(source, e));
                 break;
             }
             _ => {}
@@ -881,18 +938,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_patches_dirs_skips_oversized_xml_file_with_diagnostic() {
+    fn parse_patches_dirs_reports_invalid_utf8() {
         let dir = tempfile::tempdir().unwrap();
-        let oversized = dir.path().join("large.xml");
-        let file = std::fs::File::create(&oversized).unwrap();
-        file.set_len(rcd_core::xml_io::MAX_XML_FILE_BYTES + 1)
-            .unwrap();
-
+        std::fs::write(dir.path().join("invalid.xml"), [0xff]).unwrap();
         let (ops, errors) = parse_patches_dirs(&[dir.path().to_path_buf()]);
         assert!(ops.is_empty());
         assert_eq!(errors.len(), 1);
-        assert!(errors[0].contains("large.xml"));
-        assert!(errors[0].contains("50 MiB"));
+        assert!(errors[0].contains("invalid.xml"));
     }
 
     #[test]
@@ -1040,9 +1092,36 @@ mod tests {
         xml.push_str(r#"</operations></Operation><Operation Class="PatchOperationReplace"><xpath>Defs/Survivor</xpath></Operation></Patch>"#);
 
         let (ops, errors) = parse_patches_from_xml(&xml, "deep-sequence.xml");
+        let (_, structured) = parse_patches_from_xml_structured(&xml, "deep-sequence.xml");
+        let depth = structured
+            .iter()
+            .find(|issue| issue.code.as_deref() == Some("xml_patch_depth_exceeded"))
+            .unwrap();
+        assert_eq!(depth.params["path"], "deep-sequence.xml");
+        assert_eq!(depth.params["depth"], "64");
+        assert!(errors.contains(&depth.message));
         assert!(!errors.is_empty(), "depth overflow needs a diagnostic");
         assert_eq!(ops.len(), 1);
         assert_eq!(ops[0].xpath, "Defs/Survivor");
+    }
+
+    #[test]
+    fn malformed_xpath_text_exposes_external_detail_and_eof() {
+        let xml = r#"<Patch><Operation Class="PatchOperationAdd"><xpath>&bogus;"#;
+        let (_, issues) = parse_patches_from_xml_structured(xml, "bad.xml");
+        let decode = issues
+            .iter()
+            .find(|issue| issue.code.as_deref() == Some("xml_text_decode_failure"))
+            .unwrap();
+        assert_eq!(decode.params["path"], "bad.xml");
+        assert_eq!(decode.params["element"], "xpath");
+        assert!(!decode.params["detail"].is_empty());
+        let eof = issues
+            .iter()
+            .find(|issue| issue.code.as_deref() == Some("xml_text_unexpected_eof"))
+            .unwrap();
+        assert_eq!(eof.params["element"], "xpath");
+        assert!(issues.iter().all(|issue| issue.code.is_some()));
     }
 
     #[test]

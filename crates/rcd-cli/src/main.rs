@@ -214,6 +214,9 @@ mod tests {
             severity: sev,
             message: "m".into(),
             source: DiagnosticSource::MetadataResolution,
+            analysis_incomplete: false,
+            code: None,
+            params: Default::default(),
         }
     }
 

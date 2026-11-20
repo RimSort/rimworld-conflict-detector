@@ -372,6 +372,9 @@ mod tests {
             severity: sev,
             message: msg.into(),
             source: rcd_core::DiagnosticSource::XmlParsing,
+            analysis_incomplete: false,
+            code: None,
+            params: Default::default(),
         }
     }
 

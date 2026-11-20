@@ -19,13 +19,42 @@ pub fn mark_base_content(mods: &mut [Mod]) {
 /// The first occurrence of each case-sensitive relative path wins. Returned
 /// files are grouped by directory precedence and sorted within each directory.
 pub fn collect_files_with_precedence(dirs: &[PathBuf]) -> (Vec<PathBuf>, Vec<String>) {
+    let (files, warnings) = collect_files_with_precedence_structured(dirs);
+    (
+        files,
+        warnings
+            .into_iter()
+            .map(|warning| warning.message)
+            .collect(),
+    )
+}
+
+#[derive(Debug, Clone)]
+pub struct ContentWarning {
+    pub message: String,
+    pub code: &'static str,
+    pub params: std::collections::BTreeMap<String, String>,
+}
+
+pub fn collect_files_with_precedence_structured(
+    dirs: &[PathBuf],
+) -> (Vec<PathBuf>, Vec<ContentWarning>) {
     let mut seen = HashSet::new();
     let mut files = Vec::new();
     let mut warnings = Vec::new();
     for dir in dirs {
         let mut contents = Vec::new();
-        if let Err(error) = collect_dir(dir, dir, &mut contents) {
-            warnings.push(format!("Failed to enumerate {}: {error}", dir.display()));
+        if let Err(error) = collect_dir(dir, dir, &mut contents, &mut warnings) {
+            warnings.push(ContentWarning {
+                message: format!("Failed to enumerate {}: {error}", dir.display()),
+                code: "content_enumeration_failure",
+                params: [
+                    ("path".into(), dir.display().to_string()),
+                    ("detail".into(), error.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            });
         }
         contents.sort_by(|left, right| left.0.cmp(&right.0));
         for (relative, full_path) in contents {
@@ -37,13 +66,26 @@ pub fn collect_files_with_precedence(dirs: &[PathBuf]) -> (Vec<PathBuf>, Vec<Str
     (files, warnings)
 }
 
-fn collect_dir(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) -> std::io::Result<()> {
+fn collect_dir(
+    root: &Path,
+    dir: &Path,
+    files: &mut Vec<(String, PathBuf)>,
+    warnings: &mut Vec<ContentWarning>,
+) -> std::io::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
         let file_type = entry.file_type()?;
         if file_type.is_dir() {
-            collect_dir(root, &path, files)?;
+            collect_dir(root, &path, files, warnings)?;
+        } else if file_type.is_symlink() {
+            warnings.push(ContentWarning {
+                message: format!("Skipped symlink {}", path.display()),
+                code: "content_symlink_skipped",
+                params: [("path".into(), path.display().to_string())]
+                    .into_iter()
+                    .collect(),
+            });
         } else if file_type.is_file() {
             let relative = path
                 .strip_prefix(root)
@@ -59,6 +101,34 @@ fn collect_dir(root: &Path, dir: &Path, files: &mut Vec<(String, PathBuf)>) -> s
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn skipped_nested_symlinks_are_warned_without_hiding_normal_files() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/normal.xml"), "normal").unwrap();
+        symlink("nested/normal.xml", dir.path().join("file-link.xml")).unwrap();
+        symlink("nested", dir.path().join("dir-link")).unwrap();
+        let (files, warnings) = collect_files_with_precedence(&[dir.path().to_owned()]);
+        let (_, structured) = collect_files_with_precedence_structured(&[dir.path().to_owned()]);
+        assert_eq!(structured.len(), 2);
+        assert!(
+            structured
+                .iter()
+                .all(|warning| warning.code == "content_symlink_skipped")
+        );
+        assert!(
+            structured
+                .iter()
+                .any(|warning| warning.params["path"].contains("file-link.xml"))
+        );
+        assert_eq!(files, [dir.path().join("nested/normal.xml")]);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().any(|w| w.contains("file-link.xml")));
+        assert!(warnings.iter().any(|w| w.contains("dir-link")));
+    }
 
     #[test]
     fn nested_duplicates_are_first_wins_case_sensitive_and_deterministic() {
