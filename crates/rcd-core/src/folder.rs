@@ -683,16 +683,22 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let xml = "<loadFolders><v1.5><li>Bad</li><li>Good</li></v1.5></loadFolders>";
         let mod_path = write_mod(root.path(), "mod", "example.mod", "Example", Some(xml));
+        let bad_defs = mod_path.join("Bad").join("Defs");
         std::fs::create_dir_all(mod_path.join("Bad")).unwrap();
-        std::fs::write(mod_path.join("Bad/Defs"), "not a directory").unwrap();
+        std::fs::write(&bad_defs, "not a directory").unwrap();
         std::fs::create_dir_all(mod_path.join("Good/Defs")).unwrap();
         let mut m = parse_about_xml(&mod_path).unwrap();
         let diags = resolve_mod_folders_with_active(&mut m, Some("1.5"), &[]);
         assert_eq!(m.defs_paths, [mod_path.join("Good/Defs")]);
         assert!(
-            diags
-                .iter()
-                .any(|d| d.analysis_incomplete && d.message.contains("Bad/Defs"))
+            diags.iter().any(|d| {
+                d.analysis_incomplete
+                    && d.code.as_deref() == Some("content_path_not_directory")
+                    && d.params
+                        .get("path")
+                        .is_some_and(|path| Path::new(path) == bad_defs.as_path())
+            }),
+            "{diags:?}"
         );
     }
 
